@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>大編隊ギャラクシア｜NAWOMIDOUゲーム館</title>
+<style>
+  body{font-family:sans-serif;background:#0a0d1f;color:#e8f6ff;margin:0;padding:16px;text-align:center}
+  h1{font-size:24px;margin:8px 0}
+  p{color:#a9bed6;font-size:14px;line-height:1.6}
+  #wrap{max-width:480px;margin:0 auto}
+  canvas{width:100%;height:auto;background:#04050f;border:2px solid #35507a;border-radius:10px;touch-action:none}
+  .hud{display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;max-width:480px;margin:8px auto;font-weight:bold;font-size:15px}
+  .btns{display:flex;gap:8px;justify-content:center;margin-top:10px;flex-wrap:wrap}
+  button{font-size:17px;padding:11px 16px;border-radius:999px;border:none;background:#24365e;color:#fff;cursor:pointer;min-width:56px}
+  button:active{background:#3c5a94}
+  #fire{background:#c0392b;min-width:96px}
+  #start{background:#27ae60}
+  .dpad{display:grid;grid-template-columns:56px 56px 56px;gap:6px;justify-content:center;margin-top:10px}
+  .big{color:#ffd94d;font-weight:bold}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>👾 大編隊ギャラクシア</h1>
+  <p>ギャラクシアン風。名物は<span class="big">8体編隊攻撃</span>：ボスを先頭に8体が隊形のまま一斉に突っ込んできます（編隊を全滅させるとボーナス+400）。<br>
+  自機は左右だけでなく、<span class="big">下の3列の範囲で前後にも動けます</span>。弾は上下にずらしてかわしてください。</p>
+  <div class="hud"><span id="score">スコア: 0</span><span id="lives">残機: ❤❤❤</span><span id="msg">スタートを押してね</span></div>
+  <canvas id="cv" width="480" height="560"></canvas>
+  <div class="dpad">
+    <span></span><button id="up">▲</button><span></span>
+    <button id="left">◀</button><button id="down">▼</button><button id="right">▶</button>
+  </div>
+  <div class="btns">
+    <button id="fire">発射</button>
+    <button id="start">▶ スタート／もう一度</button>
+  </div>
+</div>
+<script>
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+const scoreEl=document.getElementById('score'), livesEl=document.getElementById('lives'), msgEl=document.getElementById('msg');
+const W=480,H=560, ZONE_TOP=452; // 自機が前後できる3列ゾーン（ZONE_TOP〜最下段）
+let player, bullets, ebullets, aliens, particles, anchor, score, running, keys={};
+let frame=0, wave=1, diveT=0, grandT=0, grand=null, invincible=0;
+
+function makeFormation(){
+  aliens=[]; anchor={x:40,y:54,dir:1};
+  for(let r=0;r<4;r++) for(let c=0;c<10;c++){
+    let type='green', hp=1, sf=30, sd=60;
+    if(r===0){ if(c>=3&&c<=6){ type='boss'; hp=2; sf=100; sd=200; } else continue; }
+    else if(r===1){ type='red'; sf=60; sd=120; }
+    else if(r===2){ type='blue'; sf=40; sd=80; }
+    aliens.push({col:c,row:r,type,hp,sf,sd,state:'form',x:0,y:0,t:0,dur:190,x0:0,y0:0,tx:0,curve:0,shootT:60+Math.random()*80,offx:0,offy:0,inGrand:false});
+  }
+}
+function slotPos(a){ return {x:anchor.x+a.col*40, y:anchor.y+a.row*34}; }
+function reset(){
+  player={x:223,y:516,w:34,h:22,speed:3.4,lives:3};
+  bullets=[]; ebullets=[]; particles=[]; score=0; running=true;
+  frame=0; wave=1; diveT=150; grandT=540; grand=null; invincible=0;
+  makeFormation();
+  scoreEl.textContent='スコア: 0'; livesEl.textContent='残機: ❤❤❤';
+  msgEl.textContent='第1ウェーブ開始！';
+}
+function addScore(n){ score+=n; scoreEl.textContent='スコア: '+score; }
+function burst(x,y,color,n){ for(let i=0;i<n;i++) particles.push({x,y,vx:(Math.random()-0.5)*5,vy:(Math.random()-0.5)*5,life:22,color}); }
+function pathPos(o,t){
+  return {
+    x:o.x0+(o.tx-o.x0)*t+Math.sin(t*Math.PI)*o.curve,
+    y:o.y0+(H+90-o.y0)*t
+  };
+}
+function startSmallDive(){
+  const cands=aliens.filter(a=>a.state==='form');
+  if(!cands.length) return;
+  const a=cands[Math.floor(Math.random()*cands.length)];
+  const p=slotPos(a);
+  a.state='dive'; a.t=0; a.dur=185; a.x0=p.x; a.y0=p.y;
+  a.tx=player.x+(Math.random()*120-60); a.curve=(Math.random()<0.5?-1:1)*(60+Math.random()*80);
+  a.shootT=40+Math.random()*50;
+}
+function startGrand(){
+  const forms=aliens.filter(a=>a.state==='form');
+  if(forms.length<8) return;
+  let leader=forms.find(a=>a.type==='boss') || forms[0];
+  const lp=slotPos(leader);
+  const others=forms.filter(a=>a!==leader)
+    .sort((m,n)=>Math.hypot(slotPos(m).x-lp.x,slotPos(m).y-lp.y)-Math.hypot(slotPos(n).x-lp.x,slotPos(n).y-lp.y))
+    .slice(0,7);
+  const members=[leader,...others];
+  grand={t:0, dur:250, x0:lp.x, y0:lp.y, tx:player.x, curve:(Math.random()<0.5?-1:1)*90, members};
+  members.forEach(a=>{
+    const p=slotPos(a);
+    a.state='grand'; a.offx=p.x-lp.x; a.offy=p.y-lp.y; a.inGrand=true;
+    a.shootT=50+Math.random()*70;
+  });
+  msgEl.textContent='⚠ 8体編隊攻撃！ 全滅させればボーナス+400';
+}
+function endGrand(){
+  if(!grand) return;
+  grand.members.forEach(a=>{ if(a.state==='grand'){ a.state='form'; a.inGrand=false; } });
+  grand=null; grandT=800+Math.random()*300;
+}
+function hitPlayer(){
+  if(invincible>0) return;
+  burst(player.x+17,player.y+11,'#5dc8ff',16);
+  player.lives--; livesEl.textContent='残機: '+'❤'.repeat(Math.max(0,player.lives));
+  ebullets=[];
+  if(player.lives<=0){ running=false; msgEl.textContent='💥 ゲームオーバー スコア '+score; }
+  else { invincible=150; player.x=223; player.y=516; msgEl.textContent='やられた！ 残機あと'+player.lives; }
+}
+function drawAlien(a){
+  const x=a.x,y=a.y;
+  const colors={boss:'#ffd94d',red:'#ff5d8f',blue:'#5dc8ff',green:'#5dff8f'};
+  ctx.fillStyle=colors[a.type];
+  if(a.type==='boss'){
+    ctx.fillRect(x+4,y+4,24,12); ctx.fillRect(x-4,y+8,40,8); ctx.fillRect(x+12,y-4,8,8);
+    ctx.fillRect(x,y+16,7,7); ctx.fillRect(x+25,y+16,7,7);
+    ctx.fillStyle='#c0392b'; ctx.fillRect(x+13,y+7,6,6);
+  } else {
+    ctx.fillRect(x+5,y+2,18,6); ctx.fillRect(x,y+8,28,9);
+    ctx.fillRect(x+3,y+17,6,6); ctx.fillRect(x+19,y+17,6,6);
+    ctx.fillStyle='#04050f'; ctx.fillRect(x+7,y+10,4,4); ctx.fillRect(x+17,y+10,4,4);
+  }
+  if(a.hp===1 && a.type==='boss'){ ctx.fillStyle='rgba(255,255,255,.5)'; ctx.fillRect(x,y,32,4); }
+}
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#ffffff';
+  for(let i=0;i<50;i++){ const x=(i*89)%W, y=(i*137)%H; ctx.fillRect(x,y,2,2); }
+  // 自機の3列ゾーン
+  ctx.fillStyle='rgba(93,200,255,.06)'; ctx.fillRect(0,ZONE_TOP,W,H-ZONE_TOP);
+  ctx.strokeStyle='rgba(93,200,255,.35)'; ctx.setLineDash([6,8]);
+  [ZONE_TOP, ZONE_TOP+36, ZONE_TOP+72].forEach(y=>{ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); });
+  ctx.setLineDash([]);
+  ctx.fillStyle='rgba(169,190,214,.8)'; ctx.font='11px sans-serif';
+  ctx.fillText('自機エリア（前後OK）', 6, ZONE_TOP+14);
+  aliens.forEach(drawAlien);
+  if(player && invincible%10<7){
+    ctx.fillStyle='#5dc8ff';
+    ctx.beginPath(); ctx.moveTo(player.x+17,player.y); ctx.lineTo(player.x,player.y+22); ctx.lineTo(player.x+34,player.y+22); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='#fff'; ctx.fillRect(player.x+14,player.y+8,6,8);
+    ctx.fillStyle='#ffd94d'; ctx.fillRect(player.x+15,player.y-3,4,4);
+  }
+  ctx.fillStyle='#ffe74d'; bullets.forEach(b=>ctx.fillRect(b.x,b.y,4,12));
+  ctx.fillStyle='#ff8a5d'; ebullets.forEach(b=>ctx.fillRect(b.x,b.y,5,10));
+  particles.forEach(p=>{ ctx.fillStyle=p.color; ctx.fillRect(p.x,p.y,4,4); });
+}
+function shoot(){ if(running && player && bullets.length<3) bullets.push({x:player.x+15,y:player.y-12}); }
+function step(){
+  if(running && player){
+    frame++;
+    if(invincible>0) invincible--;
+    // 自機移動（左右＋3列の前後）
+    if(keys.left) player.x-=player.speed;
+    if(keys.right) player.x+=player.speed;
+    if(keys.up) player.y-=player.speed;
+    if(keys.down) player.y+=player.speed;
+    player.x=Math.max(0,Math.min(W-player.w,player.x));
+    player.y=Math.max(ZONE_TOP,Math.min(H-player.h,player.y));
+    bullets.forEach(b=>b.y-=9);
+    bullets=bullets.filter(b=>b.y>-15);
+    ebullets.forEach(b=>{ b.x+=b.vx; b.y+=b.vy; });
+    ebullets=ebullets.filter(b=>b.y<H+15 && b.x>-12 && b.x<W+12);
+    particles.forEach(p=>{ p.x+=p.vx; p.y+=p.vy; p.life--; });
+    particles=particles.filter(p=>p.life>0);
+    // 編隊の横移動
+    anchor.x+=anchor.dir*0.45;
+    if(anchor.x<6||anchor.x>74) anchor.dir*=-1;
+    aliens.forEach(a=>{ if(a.state==='form'){ const p=slotPos(a); a.x=p.x; a.y=p.y; } });
+    // 単体ダイブ
+    diveT--;
+    if(diveT<=0){ startSmallDive(); if(Math.random()<0.4) startSmallDive(); diveT=Math.max(90, 210-wave*12); }
+    aliens.forEach(a=>{
+      if(a.state==='dive'){
+        a.t++;
+        const p=pathPos(a, a.t/a.dur); a.x=p.x; a.y=p.y;
+        if(a.t>=a.dur){ a.state='form'; }
+      }
+    });
+    // 8体編隊攻撃
+    if(!grand){ grandT--; if(grandT<=0) startGrand(); }
+    if(grand){
+      grand.t++;
+      const p=pathPos(grand, grand.t/grand.dur);
+      grand.members.forEach(a=>{ if(a.state==='grand'){ a.x=p.x+a.offx; a.y=p.y+a.offy; } });
+      if(grand.t>=grand.dur) endGrand();
+    }
+    // 敵弾（ダイブ中・編隊攻撃中のみ発射）
+    aliens.forEach(a=>{
+      if(a.state==='dive'||a.state==='grand'){
+        a.shootT--;
+        if(a.shootT<=0){
+          a.shootT=55+Math.random()*70;
+          const dx=player.x+17-(a.x+14);
+          ebullets.push({x:a.x+13,y:a.y+20,vx:Math.max(-1,Math.min(1,dx/160)),vy:3.6});
+        }
+      }
+    });
+    // 自弾の命中
+    bullets.forEach(b=>{
+      if(b.y<-100) return;
+      for(const a of aliens){
+        const aw=a.type==='boss'?34:28, ah=24;
+        if(b.x>a.x-2 && b.x<a.x+aw && b.y<a.y+ah && b.y+12>a.y){
+          b.y=-999; a.hp--;
+          burst(b.x,a.y+10,'#ffd94d',4);
+          if(a.hp<=0){
+            const diving=a.state!=='form';
+            addScore(diving?a.sd:a.sf);
+            burst(a.x+14,a.y+10, a.type==='boss'?'#ffd94d':'#5dff8f', 14);
+            if(a.inGrand && grand){
+              a.inGrand=false; a.state='dead';
+              if(grand.members.every(m=>m.state!=='grand')){
+                addScore(400); msgEl.textContent='🎉 8体編隊を全滅！ ボーナス+400';
+                grand=null; grandT=800+Math.random()*300;
+              } else msgEl.textContent='編隊の1体を撃墜！';
+            }
+            aliens=aliens.filter(x=>x!==a);
+          }
+          break;
+        }
+      }
+    });
+    // 被弾・接触
+    if(invincible<=0){
+      const hitB=ebullets.some(b=>b.x>player.x && b.x<player.x+player.w && b.y>player.y && b.y<player.y+player.h);
+      const hitA=aliens.some(a=>a.state!=='form' && Math.abs((a.x+14)-(player.x+17))<26 && Math.abs((a.y+10)-(player.y+11))<20);
+      if(hitB||hitA) hitPlayer();
+    }
+    // ウェーブクリア
+    if(aliens.length===0 && running){
+      wave++; addScore(100);
+      bullets=[]; ebullets=[]; grand=null; diveT=150; grandT=480;
+      makeFormation();
+      msgEl.textContent='🎉 ウェーブクリア！ 第'+wave+'ウェーブ';
+    }
+  }
+  draw();
+  requestAnimationFrame(step);
+}
+document.addEventListener('keydown',e=>{
+  if(e.code==='ArrowLeft') keys.left=true;
+  if(e.code==='ArrowRight') keys.right=true;
+  if(e.code==='ArrowUp') keys.up=true;
+  if(e.code==='ArrowDown') keys.down=true;
+  if(e.code==='Space'){ e.preventDefault(); shoot(); }
+});
+document.addEventListener('keyup',e=>{
+  if(e.code==='ArrowLeft') keys.left=false;
+  if(e.code==='ArrowRight') keys.right=false;
+  if(e.code==='ArrowUp') keys.up=false;
+  if(e.code==='ArrowDown') keys.down=false;
+});
+function hold(id,on,off){
+  const el=document.getElementById(id);
+  el.addEventListener('pointerdown',e=>{e.preventDefault(); on();});
+  el.addEventListener('pointerup',off); el.addEventListener('pointerleave',off);
+}
+hold('left',()=>keys.left=true,()=>keys.left=false);
+hold('right',()=>keys.right=true,()=>keys.right=false);
+hold('up',()=>keys.up=true,()=>keys.up=false);
+hold('down',()=>keys.down=true,()=>keys.down=false);
+document.getElementById('fire').addEventListener('pointerdown',e=>{e.preventDefault(); shoot();});
+document.getElementById('start').onclick=()=>{ reset(); };
+cv.addEventListener('pointermove',e=>{
+  if(!player) return;
+  const r=cv.getBoundingClientRect();
+  player.x=Math.max(0,Math.min(W-player.w,(e.clientX-r.left)/r.width*W-17));
+  player.y=Math.max(ZONE_TOP,Math.min(H-player.h,(e.clientY-r.top)/r.height*H-11));
+});
+// 初期画面
+player={x:223,y:516,w:34,h:22,speed:3.4,lives:3};
+bullets=[]; ebullets=[]; particles=[]; makeFormation();
+aliens.forEach(a=>{ const p=slotPos(a); a.x=p.x; a.y=p.y; });
+running=false; step();
+</script>
+</body>
+</html>
