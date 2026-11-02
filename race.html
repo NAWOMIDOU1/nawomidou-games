@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>スリップストリームGP｜NAWOMIDOUゲーム館</title>
+<style>
+  body{font-family:sans-serif;background:#0c1410;color:#eaffea;margin:0;padding:16px;text-align:center}
+  h1{font-size:24px;margin:8px 0}
+  p{color:#b7d0b7;font-size:14px;line-height:1.6}
+  #wrap{max-width:480px;margin:0 auto}
+  canvas{width:100%;height:auto;background:#2e7d32;border:2px solid #4a7a4a;border-radius:10px;touch-action:none}
+  .hud{display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;max-width:480px;margin:8px auto;font-weight:bold;font-size:15px}
+  .btns{display:flex;gap:8px;justify-content:center;margin-top:10px;flex-wrap:wrap}
+  button{font-size:17px;padding:12px 16px;border-radius:999px;border:none;background:#37503a;color:#fff;cursor:pointer;min-width:60px;user-select:none;-webkit-user-select:none}
+  button:active{background:#557c5a}
+  #accel{background:#c0392b;min-width:96px}
+  #start{background:#27ae60}
+  .controls{display:flex;justify-content:space-between;max-width:480px;margin:10px auto 0}
+  .grp{display:flex;gap:8px}
+  .big{color:#ffd94d;font-weight:bold}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>🏎️ スリップストリームGP</h1>
+  <p>俯瞰型F1風レース。名物は<span class="big">スリップストリーム</span>：前の車の真後ろにつくと風圧が抜けて加速が伸びます。「SLIP!」が出たら抜きどきです。<br>
+  8台出走・3周勝負。自車は最後尾スタートなので、全車抜きを狙ってください。芝に入ると減速します。<br>
+  操作：←→ ハンドル／↑・B アクセル／↓・Z ブレーキ。スマホ・タブレットは下のボタンで。自車は常に上向きで、コースの方が動きます。車が詰まって止まると、3秒後に少しだけすり抜けられます。</p>
+  <div class="hud"><span id="pos">POS: 8/8</span><span id="lap">LAP: 1/3</span><span id="time">TIME: 0.0</span></div>
+  <canvas id="cv" width="480" height="480"></canvas>
+  <div class="controls">
+    <div class="grp"><button id="left">◀</button><button id="right">▶</button></div>
+    <div class="grp"><button id="brake">ブレーキ</button><button id="accel">アクセル</button></div>
+  </div>
+  <div class="btns">
+    <button id="start">▶ スタート／もう一度</button>
+  </div>
+</div>
+<script>
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+const posEl=document.getElementById('pos'), lapEl=document.getElementById('lap'), timeEl=document.getElementById('time');
+const W=480,H=480, ROAD=172, LAPS=3;
+// ===== コース（ほぼ直線＋ゆるいカーブの大きな周回） =====
+const CTRL=[[350,320],[1100,300],[1850,330],[2150,520],[2180,760],[1980,950],[1500,1010],[1050,1060],[600,1020],[300,900],[200,650],[225,455],[295,360]];
+function catmull(p0,p1,p2,p3,t){
+  const t2=t*t,t3=t2*t;
+  return 0.5*((2*p1)+(-p0+p2)*t+(2*p0-5*p1+4*p2-p3)*t2+(-p0+3*p1-3*p2+p3)*t3);
+}
+const RAW=[];
+(function(){
+  const n=CTRL.length;
+  for(let i=0;i<n;i++){
+    const p0=CTRL[(i-1+n)%n],p1=CTRL[i],p2=CTRL[(i+1)%n],p3=CTRL[(i+2)%n];
+    for(let t=0;t<1;t+=0.02) RAW.push({x:catmull(p0[0],p1[0],p2[0],p3[0],t), y:catmull(p0[1],p1[1],p2[1],p3[1],t)});
+  }
+})();
+// 中心線を約10px間隔に均一化（距離ベースの再サンプル）
+const PTS=[];
+(function(){
+  const M=RAW.length, RC=[0];
+  for(let i=1;i<=M;i++){ const a=RAW[i-1],b=RAW[i%M]; RC.push(RC[i-1]+Math.hypot(b.x-a.x,b.y-a.y)); }
+  const RTOT=RC[M]; let seg=1;
+  for(let d=0;d<RTOT;d+=10){
+    while(seg<M && RC[seg]<d) seg++;
+    const a=RAW[(seg-1)%M], b=RAW[seg%M], segLen=(RC[seg]-RC[seg-1])||1, f=(d-RC[seg-1])/segLen;
+    PTS.push({x:a.x+(b.x-a.x)*f, y:a.y+(b.y-a.y)*f});
+  }
+})();
+const N=PTS.length, CUM=[0];
+for(let i=1;i<=N;i++){ const a=PTS[i-1],b=PTS[i%N]; CUM.push(CUM[i-1]+Math.hypot(b.x-a.x,b.y-a.y)); }
+const TOTAL=CUM[N];
+// スタートラインは上の直線の途中
+let startLineIdx=0;
+(function(){ let bd=1e18; PTS.forEach((p,i)=>{ const dd=(p.x-700)*(p.x-700)+(p.y-310)*(p.y-310); if(dd<bd){ bd=dd; startLineIdx=i; } }); })();
+// ミニマップ用のコース境界
+let minX=1e9,maxX=-1e9,minY=1e9,maxY=-1e9;
+PTS.forEach(p=>{ minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minY=Math.min(minY,p.y); maxY=Math.max(maxY,p.y); });
+function ptAt(idx){ return PTS[((idx%N)+N)%N]; }
+function angleWrap(a){ while(a>Math.PI)a-=Math.PI*2; while(a<-Math.PI)a+=Math.PI*2; return a; }
+function nearestIdx(car){
+  let best=car.idx, bd=1e18;
+  for(let d=-80;d<=80;d++){
+    const i=((car.idx+d)%N+N)%N, p=PTS[i];
+    const dd=(p.x-car.x)*(p.x-car.x)+(p.y-car.y)*(p.y-car.y);
+    if(dd<bd){ bd=dd; best=i; }
+  }
+  car.idx=best; car.off=Math.sqrt(bd);
+  return best;
+}
+function tangentAt(idx){ const a=ptAt(idx-3), b=ptAt(idx+3); return Math.atan2(b.y-a.y,b.x-a.x); }
+// ===== 車 =====
+const AI_DEF=[
+  {color:'#e74c3c',skill:0.90},{color:'#f39c12',skill:0.92},{color:'#9b59b6',skill:0.94},
+  {color:'#ecf0f1',skill:0.95},{color:'#3498db',skill:0.965},{color:'#e91e63',skill:0.975},{color:'#f1c40f',skill:0.985}
+];
+let cars=[], player=null, keys={}, state='idle', countT=0, raceT=0, slipOn=false, slipMeter=0, boostT=0, resultMsg='';
+function gridPlace(){
+  cars=[];
+  const startIdx=startLineIdx;
+  for(let i=0;i<8;i++){
+    const back=(Math.floor(i/2)+1)*5; // 2台ずつ並ぶグリッド（約50px間隔）
+    const idx=((startIdx-back)%N+N)%N;
+    const p=ptAt(idx), tan=tangentAt(idx);
+    const side=(i%2===0)?-28:28;
+    const isPlayer=(i===7);
+    const def=isPlayer?null:AI_DEF[i];
+    const car={
+      x:p.x+Math.cos(tan+Math.PI/2)*side, y:p.y+Math.sin(tan+Math.PI/2)*side,
+      angle:tan, speed:0, idx, off:0,
+      color:isPlayer?'#00c8ff':def.color, skill:isPlayer?1:def.skill,
+      isPlayer, raceDist:0, prevCum:CUM[idx], dist0:(CUM[startLineIdx]-CUM[idx]+TOTAL)%TOTAL,
+      lane:side, finished:false, finishT:0, wob:Math.random()*Math.PI*2
+    };
+    cars.push(car);
+    if(isPlayer) player=car;
+  }
+}
+function lapOf(car){ return Math.min(LAPS, Math.floor((car.raceDist+car.dist0)/TOTAL)+1); }
+function reset(){
+  gridPlace(); keys={}; state='count'; countT=200; raceT=0;
+  slipOn=false; slipMeter=0; boostT=0; resultMsg='';
+  posEl.textContent='POS: 8/8'; lapEl.textContent='LAP: 1/3'; timeEl.textContent='TIME: 0.0';
+}
+function updateProgress(car){
+  const before=car.idx;
+  nearestIdx(car);
+  const c=CUM[car.idx];
+  let d=c-car.prevCum;
+  if(d<-TOTAL/2) d+=TOTAL; if(d>TOTAL/2) d-=TOTAL;
+  car.raceDist+=d; car.prevCum=c;
+  if(!car.finished && (car.raceDist+car.dist0)>=TOTAL*LAPS){ car.finished=true; car.finishT=raceT; }
+}
+function stepPlayer(dt){
+  const p=player;
+  const onGrass=p.off>ROAD/2+4;
+  // スリップストリーム判定
+  slipOn=false;
+  const fx=Math.cos(p.angle), fy=Math.sin(p.angle);
+  for(const c of cars){
+    if(c===p) continue;
+    const rx=c.x-p.x, ry=c.y-p.y;
+    const ahead=rx*fx+ry*fy, lat=Math.abs(rx*(-fy)+ry*fx);
+    if(ahead>26 && ahead<105 && lat<25){ slipOn=true; break; }
+  }
+  if(slipOn){ slipMeter=Math.min(100,slipMeter+1.8*dt); if(slipMeter>=60) boostT=45; }
+  else slipMeter=Math.max(0,slipMeter-2.5*dt);
+  if(boostT>0) boostT-=dt;
+  const boosting=slipOn||boostT>0;
+  let maxS=onGrass?2.3:5.4*(boosting?1.22:1);
+  const accel=onGrass?0.10:(boosting?0.20:0.115);
+  if(state==='race'){
+    if(keys.accel) p.speed+=accel*dt;
+    else if(keys.brake) p.speed-=0.22*dt;
+    else p.speed-=0.045*dt; // エンジンブレーキ
+    const steer=(keys.left?-1:0)+(keys.right?1:0);
+    if(Math.abs(p.speed)>0.15) p.angle+=steer*0.029*dt*Math.min(1,Math.abs(p.speed)/2.4)*(p.speed<0?-1:1);
+  }
+  p.speed=Math.max(-1.2,Math.min(maxS,p.speed));
+  if(onGrass && p.speed>2.3) p.speed=Math.max(2.3,p.speed-0.12*dt);
+  p.x+=Math.cos(p.angle)*p.speed*dt;
+  p.y+=Math.sin(p.angle)*p.speed*dt;
+}
+function stepAI(car,dt){
+  if(car.finished && car!==player){ car.speed*=0.995; }
+  const look=car.idx+Math.round(4+car.speed*0.8);
+  const tp=ptAt(look), tan=tangentAt(look);
+  car.wob+=0.01*dt;
+  // コースを外れかけたら、レーン位置より中心線へ戻ることを優先する
+  const laneTarget=car.off>ROAD/2-14 ? 0 : car.lane+Math.sin(car.wob)*8;
+  const tx=tp.x+Math.cos(tan+Math.PI/2)*laneTarget, ty=tp.y+Math.sin(tan+Math.PI/2)*laneTarget;
+  const want=Math.atan2(ty-car.y,tx-car.x);
+  const diff=angleWrap(want-car.angle);
+  car.angle+=Math.max(-0.075*dt,Math.min(0.075*dt,diff*1.6));
+  // コーナーでは減速
+  const aheadTan=tangentAt(car.idx+9);
+  const curve=Math.abs(angleWrap(aheadTan-tangentAt(car.idx)));
+  let target=5.4*car.skill*(curve>0.7?0.66:curve>0.4?0.85:1);
+  // 軽いラバーバンド
+  if(player){ const gap=car.raceDist-player.raceDist; if(gap<-500) target*=1.05; if(gap>700) target*=0.96; }
+  if(car.speed<target) car.speed+=0.10*dt; else car.speed-=0.14*dt;
+  car.speed=Math.max(0,car.speed);
+  car.x+=Math.cos(car.angle)*car.speed*dt;
+  car.y+=Math.sin(car.angle)*car.speed*dt;
+}
+function collide(){
+  for(let i=0;i<cars.length;i++) for(let j=i+1;j<cars.length;j++){
+    const a=cars[i],b=cars[j];
+    if(a.ghostT>0||b.ghostT>0) continue; // 詰まり救済のすり抜け中は接触しない
+    const dx=b.x-a.x, dy=b.y-a.y, d=Math.hypot(dx,dy);
+    if(d>0 && d<27){
+      const push=(27-d)/2, nx=dx/d, ny=dy/d;
+      a.x-=nx*push; a.y-=ny*push; b.x+=nx*push; b.y+=ny*push;
+      const avg=(a.speed+b.speed)/2;
+      if(a.isPlayer) a.speed=avg*0.72; else a.speed=avg*0.9;
+      if(b.isPlayer) b.speed=avg*0.72; else b.speed=avg*0.9;
+    }
+  }
+}
+// ===== 描画 =====
+function drawCar(car){
+  ctx.save(); if(car.ghostT>0) ctx.globalAlpha=0.45;
+  ctx.translate(car.x,car.y); ctx.rotate(car.angle);
+  // タイヤ（後ろの方が太い）
+  ctx.fillStyle='#111';
+  ctx.fillRect(6,-13,8,5); ctx.fillRect(6,8,8,5);
+  ctx.fillRect(-12,-14,9,6); ctx.fillRect(-12,8,9,6);
+  // リアウイング（後ろ・濃い色）
+  ctx.fillStyle='#22252b'; ctx.fillRect(-16,-11,4,22);
+  // ボディ
+  ctx.fillStyle=car.color;
+  ctx.fillRect(-11,-5.5,19,11);
+  ctx.beginPath(); ctx.moveTo(8,-3.4); ctx.lineTo(19,-1.5); ctx.lineTo(19,1.5); ctx.lineTo(8,3.4); ctx.closePath(); ctx.fill(); // ノーズ
+  ctx.fillStyle='rgba(0,0,0,.20)'; ctx.fillRect(-11,-2.2,17,4.4); // エンジンカバー
+  // フロントウイング（一番前・明るい色）
+  ctx.fillStyle='#f2f2f2'; ctx.fillRect(17.5,-10,3.5,20);
+  // ノーズの白ライン（前の目印）
+  ctx.fillStyle='#fff'; ctx.fillRect(11,-0.9,7,1.8);
+  // コクピット＋ヘルメット
+  ctx.fillStyle='#14161c'; ctx.beginPath(); ctx.arc(-1,0,4.6,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#fff'; ctx.beginPath(); ctx.arc(0.5,0,2.6,0,Math.PI*2); ctx.fill();
+  if(car.isPlayer){
+    ctx.strokeStyle='#ffe74d'; ctx.lineWidth=2.5;
+    ctx.beginPath(); ctx.arc(0,0,21,0,Math.PI*2); ctx.stroke();
+    ctx.fillStyle='#ffe74d'; ctx.beginPath(); ctx.moveTo(31,0); ctx.lineTo(22,-5.5); ctx.lineTo(22,5.5); ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // カメラ：自車は画面の中央やや下に固定され、常に上を向く。コースの方が回って流れていく
+  ctx.save();
+  ctx.translate(W/2, H*0.60);
+  if(player) ctx.rotate(-player.angle-Math.PI/2);
+  ctx.translate(-(player?player.x:200), -(player?player.y:200));
+  ctx.fillStyle='#2e7d32'; ctx.fillRect((player?player.x:200)-760,(player?player.y:200)-760,1520,1520);
+  ctx.lineJoin='round'; ctx.lineCap='round';
+  const trace=()=>{ ctx.beginPath(); PTS.forEach((p,i)=> i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y)); ctx.closePath(); };
+  trace(); ctx.strokeStyle='#f5f5f5'; ctx.lineWidth=ROAD+16; ctx.stroke();
+  // 縁石（赤白）: 区間ごとに色を変えて描く
+  for(let i=0;i<N;i+=6){
+    ctx.beginPath();
+    for(let k=0;k<=6;k++){ const p=ptAt(i+k); k?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y); }
+    ctx.strokeStyle=((i/6)%2===0)?'#d43a2f':'#f5f5f5'; ctx.lineWidth=ROAD+10; ctx.stroke();
+  }
+  trace(); ctx.strokeStyle='#3d4450'; ctx.lineWidth=ROAD; ctx.stroke();
+  // スタートライン
+  const sp=ptAt(startLineIdx), st=tangentAt(startLineIdx);
+  ctx.save(); ctx.translate(sp.x,sp.y); ctx.rotate(st+Math.PI/2);
+  for(let rI=0;rI<3;rI++) for(let cI=0;cI<10;cI++){ ctx.fillStyle=((rI+cI)%2===0)?'#fff':'#111'; ctx.fillRect(-ROAD/2+cI*(ROAD/10), -9+rI*6, ROAD/10, 6); }
+  ctx.restore();
+  // スリップの風
+  if(slipOn && player){
+    ctx.strokeStyle='rgba(255,255,255,.75)'; ctx.lineWidth=2;
+    for(let i=0;i<3;i++){
+      const bx=player.x-Math.cos(player.angle)*(26+i*12), by=player.y-Math.sin(player.angle)*(26+i*12);
+      ctx.beginPath(); ctx.moveTo(bx-8,by-6+i*6); ctx.lineTo(bx+8,by-6+i*6); ctx.stroke();
+    }
+  }
+  cars.forEach(drawCar);
+  ctx.restore();
+  // ミニマップ
+  ctx.fillStyle='rgba(0,0,0,.55)'; ctx.fillRect(W-126,10,116,104);
+  ctx.strokeStyle='#ffd94d'; ctx.lineWidth=2;
+  ctx.beginPath();
+  PTS.forEach((p,i)=>{ const mx=W-118+(p.x-minX)/(maxX-minX)*100, my=16+(p.y-minY)/(maxY-minY)*92; i?ctx.lineTo(mx,my):ctx.moveTo(mx,my); });
+  ctx.closePath(); ctx.stroke();
+  cars.forEach(c=>{ ctx.fillStyle=c.isPlayer?'#fff':c.color; ctx.beginPath(); ctx.arc(W-118+(c.x-minX)/(maxX-minX)*100, 16+(c.y-minY)/(maxY-minY)*92, c.isPlayer?3.4:2.4, 0, Math.PI*2); ctx.fill(); });
+  // 速度計
+  ctx.fillStyle='rgba(0,0,0,.65)'; ctx.fillRect(W-126,H-64,116,54);
+  ctx.fillStyle='#7CFC00'; ctx.font='bold 26px monospace'; ctx.textAlign='right';
+  ctx.fillText(player?String(Math.round(Math.abs(player.speed)*42)):'0', W-44, H-26);
+  ctx.fillStyle='#fff'; ctx.font='11px sans-serif'; ctx.fillText('km/h', W-14, H-26);
+  ctx.fillStyle=slipMeter>0?'#ffd94d':'#5a6b5a'; ctx.font='bold 12px sans-serif'; ctx.textAlign='left';
+  ctx.fillText('SLIP', W-118, H-46);
+  ctx.fillStyle='#444'; ctx.fillRect(W-84,H-54,64,7);
+  ctx.fillStyle=boostT>0?'#ff8a5d':'#ffd94d'; ctx.fillRect(W-84,H-54,64*slipMeter/100,7);
+  ctx.textAlign='left';
+  if(slipOn){ ctx.fillStyle='#ffd94d'; ctx.font='bold 20px sans-serif'; ctx.fillText('SLIP!', 14, 30); }
+  if(state==='count'){
+    const n=Math.ceil(countT/60);
+    ctx.fillStyle='rgba(0,0,0,.45)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#fff'; ctx.font='bold 64px sans-serif'; ctx.textAlign='center';
+    ctx.fillText(countT>30?String(n):'GO!', W/2, H/2);
+    ctx.textAlign='left';
+  }
+  if(state==='finish'){
+    ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#fff'; ctx.font='bold 30px sans-serif'; ctx.textAlign='center';
+    ctx.fillText('🏁 フィニッシュ！', W/2, H/2-30);
+    ctx.font='bold 24px sans-serif';
+    ctx.fillText(resultMsg, W/2, H/2+8);
+    ctx.font='16px sans-serif';
+    ctx.fillText('もう一度は下のボタンから', W/2, H/2+40);
+    ctx.textAlign='left';
+  }
+  if(state==='idle'){
+    ctx.fillStyle='rgba(0,0,0,.5)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#fff'; ctx.font='bold 22px sans-serif'; ctx.textAlign='center';
+    ctx.fillText('スタートを押してね', W/2, H/2);
+    ctx.textAlign='left';
+  }
+}
+let lastTs=0;
+function loop(ts){
+  const dt=Math.min(2.2,(ts-lastTs)/16.7||1); lastTs=ts;
+  if(state==='count'){ countT-=dt; if(countT<=0){ state='race'; } }
+  if(state==='race'||state==='count'){
+    if(state==='race') raceT+=dt/60;
+    cars.forEach(c=>{ if(c.isPlayer) stepPlayer(state==='race'?dt:0); else if(state==='race') stepAI(c,dt); });
+    if(state==='race'){
+      // 詰まって止まった車は、3秒後に少しの間すり抜けられるようにする
+      cars.forEach(c=>{
+        if(c.ghostT>0) c.ghostT-=dt;
+        if(Math.abs(c.speed)<0.4){ c.stuckT=(c.stuckT||0)+dt; if(c.stuckT>180){ c.ghostT=100; c.stuckT=0; } }
+        else c.stuckT=0;
+      });
+      collide(); cars.forEach(updateProgress);
+    }
+    else cars.forEach(c=>nearestIdx(c));
+    // 順位とHUD
+    const sorted=[...cars].sort((a,b)=>(b.raceDist+b.dist0)-(a.raceDist+a.dist0));
+    const pos=sorted.indexOf(player)+1;
+    posEl.textContent='POS: '+pos+'/8';
+    lapEl.textContent='LAP: '+lapOf(player)+'/'+LAPS;
+    timeEl.textContent='TIME: '+raceT.toFixed(1);
+    if(player.finished){
+      state='finish';
+      resultMsg='順位 '+pos+'位 ／ タイム '+raceT.toFixed(1)+'秒';
+    }
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+document.addEventListener('keydown',e=>{
+  if(e.code==='ArrowLeft') keys.left=true;
+  if(e.code==='ArrowRight') keys.right=true;
+  if(e.code==='ArrowUp'||e.code==='KeyB'){ keys.accel=true; e.preventDefault(); }
+  if(e.code==='ArrowDown'||e.code==='KeyZ'){ keys.brake=true; e.preventDefault(); }
+});
+document.addEventListener('keyup',e=>{
+  if(e.code==='ArrowLeft') keys.left=false;
+  if(e.code==='ArrowRight') keys.right=false;
+  if(e.code==='ArrowUp'||e.code==='KeyB') keys.accel=false;
+  if(e.code==='ArrowDown'||e.code==='KeyZ') keys.brake=false;
+});
+function hold(id,key){
+  const el=document.getElementById(id);
+  el.addEventListener('pointerdown',e=>{e.preventDefault(); keys[key]=true;});
+  const off=()=>{ keys[key]=false; };
+  el.addEventListener('pointerup',off); el.addEventListener('pointerleave',off); el.addEventListener('pointercancel',off);
+}
+hold('left','left'); hold('right','right'); hold('accel','accel'); hold('brake','brake');
+document.getElementById('start').onclick=()=>{ reset(); };
+gridPlace();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
