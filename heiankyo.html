@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>平安京トラフィック｜NAWOMIDOUゲーム館</title>
+<style>
+  body{font-family:sans-serif;background:#171126;color:#f2e9ff;margin:0;padding:16px;text-align:center}
+  h1{font-size:24px;margin:8px 0}
+  p{color:#c9bce0;font-size:14px;line-height:1.6}
+  #wrap{max-width:540px;margin:0 auto}
+  canvas{width:100%;height:auto;background:#2c3242;border:2px solid #6b5a94;border-radius:10px;touch-action:none}
+  .hud{display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;max-width:540px;margin:8px auto;font-weight:bold;font-size:15px}
+  .btns{display:flex;gap:8px;justify-content:center;margin-top:10px;flex-wrap:wrap}
+  button{font-size:17px;padding:11px 16px;border-radius:999px;border:none;background:#3a2f5e;color:#fff;cursor:pointer;min-width:56px}
+  button:active{background:#5a4a94}
+  #act{background:#c0392b;min-width:110px}
+  #start{background:#27ae60}
+  .dpad{display:grid;grid-template-columns:56px 56px 56px;gap:6px;justify-content:center;margin-top:10px}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>👽 平安京トラフィック</h1>
+  <p>平安京エイリアン風。穴を掘ってエイリアンを落とし、埋めて退治します。<br>
+  ただし道には車が走っています。<b>北の道は一方通行、大通りは3車線で中央の車は行ったり来たり、南の道は2車線。</b><br>
+  車にひかれると死亡。車とエイリアンがぶつかると両方とも消えます。車も穴に落ちるので、そのまま埋めるとボーナスです（約8秒でレッカーされちゃいます）。穴は自分が向いている方向の先にできます。</p>
+  <div class="hud"><span id="score">スコア: 0</span><span id="lives">残機: ❤❤❤</span><span id="prog">埋めた数: 0/5</span><span id="msg">スタートを押してね</span></div>
+  <canvas id="cv" width="540" height="540"></canvas>
+  <div class="dpad">
+    <span></span><button id="up">▲</button><span></span>
+    <button id="left">◀</button><button id="down">▼</button><button id="right">▶</button>
+  </div>
+  <div class="btns">
+    <button id="act">⛏ 掘る／埋める</button>
+    <button id="start">▶ スタート／もう一度</button>
+  </div>
+</div>
+<script>
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+const scoreEl=document.getElementById('score'), livesEl=document.getElementById('lives'), progEl=document.getElementById('prog'), msgEl=document.getElementById('msg');
+const VB=[60,240,420], HB=[60,240,420], BAND=60; // 通り（縦・横）の開始座標、幅60
+let player, aliens, cars, holes, particles, score, running, keys={}, frame=0, wave=1, quota=5, buriedWave=0, spawnT=0, invincible=0;
+
+const LANES=[
+  {y:90,  dir:1,  speed:2.0, color:'#5dc8ff', timer:60},            // 北：1車線・一方通行
+  {y:250, dir:1,  speed:2.4, color:'#ff8a5d', timer:150, mid:true}, // 中央3車線：上段 →
+  {y:270, dir:1,  speed:1.8, color:'#ffd94d', timer:260, shuttle:true}, // 中央：行ったり来たり（常に1台だけ）
+  {y:290, dir:-1, speed:2.4, color:'#ff8a5d', timer:210, mid:true}, // 中央3車線：下段 ←
+  {y:438, dir:1,  speed:2.2, color:'#5dff8f', timer:110},           // 南：2車線 →
+  {y:462, dir:-1, speed:2.2, color:'#5dff8f', timer:190}            // 南：2車線 ←
+];
+function isStreet(x,y){
+  const inV=VB.some(b=>x>=b && x<=b+BAND), inH=HB.some(b=>y>=b && y<=b+BAND);
+  return inV||inH;
+}
+function canStand(x,y,r){
+  return isStreet(x-r,y-r)&&isStreet(x+r,y-r)&&isStreet(x-r,y+r)&&isStreet(x+r,y+r);
+}
+function reset(){
+  player={x:270,y:505,r:11,speed:2.3,lives:3,actionT:0,fx:0,fy:-1};
+  aliens=[]; cars=[]; holes=[]; particles=[]; score=0; running=true;
+  frame=0; wave=1; quota=5; buriedWave=0; spawnT=30; invincible=0;
+  LANES.forEach((l,i)=>l.timer=60+i*70);
+  scoreEl.textContent='スコア: 0'; livesEl.textContent='残機: ❤❤❤'; progEl.textContent='埋めた数: 0/5';
+  msgEl.textContent='穴を掘ってエイリアンを埋めよう！ 車に注意';
+}
+function addScore(n){ score+=n; scoreEl.textContent='スコア: '+score; }
+function burst(x,y,color,n){ for(let i=0;i<n;i++) particles.push({x,y,vx:(Math.random()-0.5)*5,vy:(Math.random()-0.5)*5,life:22,color}); }
+
+function doAction(){
+  if(!running || player.actionT>0) return;
+  // 穴は「向いている方向の先」に作る／埋める
+  const fxp=player.x+player.fx*24, fyp=player.y+player.fy*24;
+  const h=holes.find(h=>Math.hypot(h.x-fxp,h.y-fyp)<18);
+  player.actionT=18;
+  if(h){
+    if(h.occ && h.occ.type==='alien'){
+      const a=h.occ.ref; aliens=aliens.filter(x=>x!==a);
+      burst(h.x,h.y,'#9dff5d',16); addScore(300); buriedWave++;
+      progEl.textContent='埋めた数: '+buriedWave+'/'+quota;
+      msgEl.textContent='エイリアンを埋めた！ +300';
+      holes=holes.filter(x=>x!==h);
+    } else if(h.occ && h.occ.type==='car'){
+      const c=h.occ.ref; cars=cars.filter(x=>x!==c);
+      burst(h.x,h.y,'#ffd94d',16); addScore(200);
+      msgEl.textContent='車を埋めた！ ボーナス +200';
+      holes=holes.filter(x=>x!==h);
+    } else {
+      holes=holes.filter(x=>x!==h);
+      msgEl.textContent='穴を埋め戻した';
+    }
+    return;
+  }
+  // なければ向いている先のマスに掘る
+  if(holes.length>=6){ msgEl.textContent='穴は6つまで'; return; }
+  const cx=Math.floor(fxp/30)*30+15, cy=Math.floor(fyp/30)*30+15;
+  if(holes.some(h=>h.x===cx&&h.y===cy)) return;
+  if(!isStreet(cx,cy)){ msgEl.textContent='道の上でしか掘れない'; return; }
+  holes.push({x:cx,y:cy,occ:null});
+  msgEl.textContent='穴を掘った';
+}
+function hitPlayer(why){
+  if(invincible>0) return;
+  burst(player.x,player.y,'#5dc8ff',16);
+  player.lives--; livesEl.textContent='残機: '+'❤'.repeat(Math.max(0,player.lives));
+  if(player.lives<=0){ running=false; msgEl.textContent='💥 ゲームオーバー（'+why+'） スコア '+score; }
+  else { invincible=150; player.x=270; player.y=505; msgEl.textContent=why+'！ 残機あと'+player.lives; }
+}
+function spawnAlien(){
+  const xs=[90,270,450];
+  const x=xs[Math.floor(Math.random()*xs.length)];
+  aliens.push({x:x+(Math.random()*20-10), y:12, r:11, dirT:0, dx:0, dy:1, state:'roam', trapT:0, immune:0});
+}
+function moveAlien(a){
+  if(a.immune>0) a.immune--;
+  a.dirT--;
+  if(a.dirT<=0){
+    a.dirT=26+Math.random()*20;
+    const dx=player.x-a.x, dy=player.y-a.y;
+    const opts=[];
+    if(Math.abs(dx)>8) opts.push({x:Math.sign(dx),y:0},{x:Math.sign(dx),y:0});
+    if(Math.abs(dy)>8) opts.push({x:0,y:Math.sign(dy)},{x:0,y:Math.sign(dy)});
+    opts.push({x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1});
+    const shuffled=opts.sort(()=>Math.random()-0.5);
+    let chosen={x:0,y:0};
+    for(const o of shuffled){ if(canStand(a.x+o.x*14,a.y+o.y*14,a.r)){ chosen=o; break; } }
+    a.dx=chosen.x; a.dy=chosen.y;
+  }
+  const sp=Math.min(1.7, 1.02+wave*0.07);
+  const nx=a.x+a.dx*sp, ny=a.y+a.dy*sp;
+  if(canStand(nx,ny,a.r)){ a.x=nx; a.y=ny; }
+  else a.dirT=0;
+  // 穴に落ちる
+  if(a.immune<=0){
+    const h=holes.find(h=>!h.occ && Math.hypot(h.x-a.x,h.y-a.y)<15);
+    if(h){ a.state='trapped'; a.x=h.x; a.y=h.y; a.trapT=300; h.occ={type:'alien',ref:a}; msgEl.textContent='エイリアンが穴に落ちた！ 早く埋めよう'; }
+  }
+}
+function updateCars(){
+  LANES.forEach(lane=>{
+    lane.timer--;
+    if(lane.timer<=0){
+      // 中央の車線は間隔を広めに。往復車線は常に1台だけ
+      lane.timer=lane.shuttle ? 99999 : (lane.mid ? 260+Math.random()*220 : 160+Math.random()*170);
+      const sx=lane.dir>0 ? -24 : 564;
+      if(lane.shuttle && cars.some(c=>c.lane===lane)) return;
+      if(!cars.some(c=>c.lane===lane && Math.abs(c.x-sx)<110))
+        cars.push({lane, x:sx, y:lane.y, dir:lane.dir, stuck:false, stuckT:0, w:34, h:15});
+    }
+  });
+  cars.forEach(c=>{
+    if(c.stuck){
+      // 穴に落ちた車は約8秒でレッカー移動され、穴は空に戻る
+      c.stuckT++;
+      if(c.stuckT>480){
+        const h=holes.find(h=>h.occ && h.occ.ref===c);
+        if(h) h.occ=null;
+        cars=cars.filter(x=>x!==c);
+        msgEl.textContent='穴の車はレッカーで運ばれた';
+      }
+      return;
+    }
+    // 前の車に追いついたら止まる
+    const ahead=cars.some(o=>o!==c && o.lane===c.lane && (o.x-c.x)*c.dir>0 && Math.abs(o.x-c.x)<46);
+    if(ahead) return;
+    c.x+=c.dir*c.lane.speed;
+    if(c.lane.shuttle){
+      if(c.x<26){ c.x=26; c.dir=1; }
+      if(c.x>514){ c.x=514; c.dir=-1; }
+    }
+    // 空き穴に落ちる
+    const h=holes.find(h=>!h.occ && Math.abs(h.y-c.y)<=12 && Math.abs(h.x-c.x)<16);
+    if(h){ c.stuck=true; c.stuckT=0; c.x=h.x; h.occ={type:'car',ref:c}; burst(h.x,h.y,'#ffffff',8); msgEl.textContent='車が穴に落ちた！ 埋めるチャンス（約8秒以内）'; }
+  });
+  cars=cars.filter(c=>c.stuck || (c.x>-50 && c.x<590));
+}
+function draw(){
+  ctx.clearRect(0,0,540,540);
+  // 町並み（建物ブロック）
+  const segs=[0,120,300,480], ends=[60,240,420,540];
+  for(let i=0;i<4;i++) for(let j=0;j<4;j++){
+    const x=segs[i], y=segs[j], w=ends[i]-x, h=ends[j]-y;
+    ctx.fillStyle=['#4a3b63','#54436e','#41335c','#5a4878'][(i+j)%4];
+    ctx.fillRect(x+3,y+3,w-6,h-6);
+    ctx.fillStyle='rgba(255,230,150,.25)';
+    for(let wx=x+12; wx<x+w-12; wx+=18) for(let wy=y+12; wy<y+h-12; wy+=18) ctx.fillRect(wx,wy,7,7);
+  }
+  // 中央大通りの強調
+  ctx.fillStyle='rgba(255,217,77,.10)'; ctx.fillRect(0,240,540,60);
+  // 車線の破線
+  ctx.strokeStyle='rgba(255,255,255,.35)'; ctx.setLineDash([10,10]); ctx.beginPath();
+  [150,255,285,450].forEach(y=>{ ctx.moveTo(0,y); ctx.lineTo(540,y); });
+  ctx.stroke(); ctx.setLineDash([]);
+  // 穴
+  holes.forEach(h=>{
+    ctx.fillStyle='#0a0a12'; ctx.beginPath(); ctx.ellipse(h.x,h.y,14,10,0,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='#8a7a5a'; ctx.stroke();
+    if(h.occ && h.occ.type==='alien'){
+      ctx.fillStyle='#9dff5d'; ctx.fillRect(h.x-6,h.y-12,12,9);
+      ctx.fillStyle='#0a0a12'; ctx.fillRect(h.x-4,h.y-9,3,3); ctx.fillRect(h.x+2,h.y-9,3,3);
+    }
+    if(h.occ && h.occ.type==='car'){
+      ctx.fillStyle='#ffd94d'; ctx.fillRect(h.x-15,h.y-8,30,11);
+      ctx.fillStyle='#243'; ctx.fillRect(h.x-8,h.y-11,14,5);
+    }
+  });
+  // 車
+  cars.forEach(c=>{
+    ctx.save(); ctx.translate(c.x,c.y); if(c.dir<0) ctx.scale(-1,1);
+    if(c.stuck) ctx.rotate(0.18);
+    ctx.fillStyle=c.lane.color; ctx.fillRect(-17,-7,34,14);
+    ctx.fillStyle='#203040'; ctx.fillRect(-7,-11,15,6);
+    ctx.fillStyle='#111'; ctx.fillRect(-13,5,8,5); ctx.fillRect(6,5,8,5);
+    ctx.restore();
+  });
+  // エイリアン
+  aliens.forEach(a=>{
+    if(a.state==='trapped') return; // 穴の中で描画済み
+    ctx.fillStyle='#9dff5d';
+    ctx.fillRect(a.x-8,a.y-10,16,14); ctx.fillRect(a.x-11,a.y-4,22,8);
+    ctx.fillRect(a.x-9,a.y+4,5,7); ctx.fillRect(a.x+4,a.y+4,5,7);
+    ctx.fillStyle='#0a0a12'; ctx.fillRect(a.x-5,a.y-6,4,4); ctx.fillRect(a.x+2,a.y-6,4,4);
+  });
+  // プレイヤー（検非違使ふう）
+  if(player && invincible%10<7){
+    ctx.fillStyle='#3a6bd8'; ctx.fillRect(player.x-8,player.y-6,16,14);
+    ctx.fillStyle='#f2d0a0'; ctx.fillRect(player.x-6,player.y-13,12,8);
+    ctx.fillStyle='#22224a'; ctx.fillRect(player.x-8,player.y-16,16,4);
+    if(player.actionT>0){ ctx.fillStyle='#ffd94d'; ctx.fillRect(player.x+8,player.y-14,4,14); }
+  }
+  particles.forEach(p=>{ ctx.fillStyle=p.color; ctx.fillRect(p.x,p.y,4,4); });
+  ctx.fillStyle='#ffd94d'; ctx.font='bold 14px sans-serif';
+  ctx.fillText('第'+wave+'幕 あと'+(quota-buriedWave)+'体', 10, 22);
+}
+function step(){
+  if(running && player){
+    frame++;
+    if(invincible>0) invincible--;
+    if(player.actionT>0) player.actionT--;
+    else {
+      let mx=0,my=0;
+      if(keys.left) mx-=1; if(keys.right) mx+=1; if(keys.up) my-=1; if(keys.down) my+=1;
+      if(mx!==0){ player.fx=mx; player.fy=0; } else if(my!==0){ player.fx=0; player.fy=my; }
+      const nx=player.x+mx*player.speed, ny=player.y+my*player.speed;
+      if(canStand(nx,player.y,player.r)) player.x=nx;
+      if(canStand(player.x,ny,player.r)) player.y=ny;
+    }
+    // エイリアン出現
+    spawnT--;
+    const cap=Math.min(7, 3+wave);
+    if(spawnT<=0 && aliens.filter(a=>a.state==='roam'||a.state==='trapped').length<cap){ spawnAlien(); spawnT=200; }
+    aliens.forEach(a=>{
+      if(a.state==='roam') moveAlien(a);
+      else if(a.state==='trapped'){
+        a.trapT--;
+        if(a.trapT<=0){
+          const h=holes.find(h=>h.occ && h.occ.ref===a);
+          if(h) h.occ=null;
+          a.state='roam'; a.immune=70; a.y-=16; msgEl.textContent='エイリアンが穴から逃げた！';
+        }
+      }
+    });
+    updateCars();
+    // 衝突判定
+    if(invincible<=0){
+      if(aliens.some(a=>a.state==='roam' && Math.hypot(a.x-player.x,a.y-player.y)<20)) hitPlayer('エイリアンに捕まった');
+      else if(cars.some(c=>!c.stuck && Math.abs(c.x-player.x)<25 && Math.abs(c.y-player.y)<15)) hitPlayer('車にひかれた');
+    }
+    // 車×エイリアン
+    aliens.filter(a=>a.state==='roam').forEach(a=>{
+      const c=cars.find(c=>!c.stuck && Math.abs(c.x-a.x)<26 && Math.abs(c.y-a.y)<15);
+      if(c){
+        burst(a.x,a.y,'#ff8a5d',18);
+        aliens=aliens.filter(x=>x!==a); cars=cars.filter(x=>x!==c);
+        msgEl.textContent='車とエイリアンが衝突！ 両方とも消えた';
+      }
+    });
+    particles.forEach(p=>{ p.x+=p.vx; p.y+=p.vy; p.life--; });
+    particles=particles.filter(p=>p.life>0);
+    // 幕クリア
+    if(buriedWave>=quota && running){
+      wave++; buriedWave=0; quota+=2;
+      aliens=[]; cars=[]; holes=[];
+      progEl.textContent='埋めた数: 0/'+quota;
+      msgEl.textContent='🎉 次の幕へ！ 第'+wave+'幕（目標'+quota+'体）';
+    }
+  }
+  draw();
+  requestAnimationFrame(step);
+}
+document.addEventListener('keydown',e=>{
+  if(e.code==='ArrowLeft') keys.left=true;
+  if(e.code==='ArrowRight') keys.right=true;
+  if(e.code==='ArrowUp') keys.up=true;
+  if(e.code==='ArrowDown') keys.down=true;
+  if(e.code==='Space'){ e.preventDefault(); doAction(); }
+});
+document.addEventListener('keyup',e=>{
+  if(e.code==='ArrowLeft') keys.left=false;
+  if(e.code==='ArrowRight') keys.right=false;
+  if(e.code==='ArrowUp') keys.up=false;
+  if(e.code==='ArrowDown') keys.down=false;
+});
+function hold(id,on,off){
+  const el=document.getElementById(id);
+  el.addEventListener('pointerdown',e=>{e.preventDefault(); on();});
+  el.addEventListener('pointerup',off); el.addEventListener('pointerleave',off);
+}
+hold('left',()=>keys.left=true,()=>keys.left=false);
+hold('right',()=>keys.right=true,()=>keys.right=false);
+hold('up',()=>keys.up=true,()=>keys.up=false);
+hold('down',()=>keys.down=true,()=>keys.down=false);
+document.getElementById('act').addEventListener('pointerdown',e=>{e.preventDefault(); doAction();});
+document.getElementById('start').onclick=()=>{ reset(); };
+// 初期画面
+player={x:270,y:505,r:11,speed:2.3,lives:3,actionT:0,fx:0,fy:-1};
+aliens=[]; cars=[]; holes=[]; particles=[]; running=false; wave=1; quota=5; buriedWave=0; step();
+</script>
+</body>
+</html>
