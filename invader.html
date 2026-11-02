@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>合体インベーダー｜NAWOMIDOUゲーム館</title>
+<style>
+  body{font-family:sans-serif;background:#0b1020;color:#e8f6ff;margin:0;padding:16px;text-align:center}
+  h1{font-size:24px;margin:8px 0}
+  p{color:#a9bed6;font-size:14px;line-height:1.6}
+  #wrap{max-width:480px;margin:0 auto}
+  canvas{width:100%;height:auto;background:#050814;border:2px solid #35507a;border-radius:10px;touch-action:none}
+  .hud{display:flex;justify-content:space-between;max-width:480px;margin:8px auto;font-weight:bold}
+  .btns{display:flex;gap:8px;justify-content:center;margin-top:10px}
+  button{font-size:18px;padding:12px 18px;border-radius:999px;border:none;background:#24365e;color:#fff;cursor:pointer;min-width:72px}
+  button:active{background:#3c5a94}
+  #fire{background:#c0392b;min-width:96px}
+  #start{background:#27ae60}
+  .gattai{color:#ffd94d;font-weight:bold}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>👾 合体インベーダー</h1>
+  <p>← → で移動、スペースで発射。スマホは下のボタンでも遊べます。<br>
+  <span class="gattai">名物ルール：</span>UFOが編隊の上空に来ると、近くのエイリアンを吸い上げて<span class="gattai">巨大な合体敵</span>に変身します。
+  合体前にUFOを撃ち落とせばボーナス300点。合体したら、2方向弾を撃つ強敵（HP20・500点）との勝負です。</p>
+  <div class="hud"><span id="score">スコア: 0</span><span id="lives">残機: ❤❤❤</span><span id="msg">スタートを押してね</span></div>
+  <canvas id="cv" width="480" height="520"></canvas>
+  <div class="btns">
+    <button id="left">◀</button>
+    <button id="fire">発射</button>
+    <button id="right">▶</button>
+  </div>
+  <div class="btns"><button id="start">▶ スタート／もう一度</button></div>
+</div>
+<script>
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+const scoreEl=document.getElementById('score'), livesEl=document.getElementById('lives'), msgEl=document.getElementById('msg');
+let player, bullets, ebullets, enemies, particles, dir, enemyTimer, score, running, keys={};
+let ufo=null, giant=null, frame=0, ufoTimer=0, wave=1, invincible=0, mergeFlash=0;
+
+function spawnWave(){
+  enemies=[]; dir=1; enemyTimer=0;
+  const startY=56+Math.min(40,(wave-1)*10);
+  for(let r=0;r<4;r++) for(let c=0;c<8;c++)
+    enemies.push({x:38+c*50, y:startY+r*42, w:30, h:22, alive:true, row:r});
+}
+function reset(){
+  player={x:225,y:470,w:34,h:22,speed:5,lives:3};
+  bullets=[]; ebullets=[]; particles=[]; score=0; running=true;
+  ufo=null; giant=null; frame=0; ufoTimer=300; wave=1; invincible=0; mergeFlash=0;
+  spawnWave();
+  scoreEl.textContent='スコア: 0'; livesEl.textContent='残機: ❤❤❤';
+  msgEl.textContent='第1ウェーブ開始！';
+}
+function addScore(n){ score+=n; scoreEl.textContent='スコア: '+score; }
+function burst(x,y,color,n){
+  for(let i=0;i<n;i++) particles.push({x,y,vx:(Math.random()-0.5)*5,vy:(Math.random()-0.5)*5,life:24,color});
+}
+function drawAlien(e){
+  const colors=['#ff5d8f','#ffb84d','#5dff8f','#5dc8ff'];
+  ctx.fillStyle=colors[e.row];
+  const x=e.x,y=e.y;
+  ctx.fillRect(x+6,y,18,6); ctx.fillRect(x,y+6,30,10);
+  ctx.fillRect(x+4,y+16,6,6); ctx.fillRect(x+20,y+16,6,6);
+  ctx.fillStyle='#050814';
+  ctx.fillRect(x+7,y+9,5,5); ctx.fillRect(x+18,y+9,5,5);
+}
+function drawUFO(u){
+  ctx.fillStyle='#c0c8ff';
+  ctx.fillRect(u.x+14,u.y,20,8); ctx.fillRect(u.x,u.y+8,48,10);
+  ctx.fillStyle='#ff5d8f'; ctx.fillRect(u.x+20,u.y+2,8,4);
+  ctx.fillStyle='#ffe74d';
+  for(let i=0;i<4;i++) ctx.fillRect(u.x+6+i*12,u.y+12,5,4);
+}
+function drawGiant(g){
+  // 合体した巨大敵：UFOの胴体＋エイリアンの目と足
+  const x=g.x,y=g.y;
+  ctx.fillStyle='#8e6bff';
+  ctx.fillRect(x+28,y,44,14); ctx.fillRect(x,y+14,100,30);
+  ctx.fillRect(x+10,y+44,16,14); ctx.fillRect(x+40,y+44,16,14); ctx.fillRect(x+70,y+44,16,14);
+  ctx.fillStyle='#ff5d8f'; ctx.fillRect(x+42,y+4,16,7);
+  ctx.fillStyle='#050814';
+  ctx.fillRect(x+18,y+24,12,12); ctx.fillRect(x+44,y+24,12,12); ctx.fillRect(x+70,y+24,12,12);
+  ctx.fillStyle='#ffe74d';
+  for(let i=0;i<6;i++) ctx.fillRect(x+8+i*16,y+16,6,5);
+  // HPバー
+  ctx.fillStyle='#333'; ctx.fillRect(x,y-12,100,7);
+  ctx.fillStyle='#ff5d5d'; ctx.fillRect(x,y-12,100*Math.max(0,g.hp/g.maxhp),7);
+}
+function draw(){
+  ctx.clearRect(0,0,480,520);
+  ctx.fillStyle='#ffffff';
+  for(let i=0;i<40;i++){ const x=(i*67)%480, y=(i*113)%520; ctx.fillRect(x,y,2,2); }
+  if(mergeFlash>0){
+    ctx.fillStyle='rgba(255,217,77,'+(mergeFlash/20*0.35)+')';
+    ctx.fillRect(0,0,480,520);
+  }
+  if(player && invincible%10<7){
+    ctx.fillStyle='#5dc8ff';
+    ctx.beginPath(); ctx.moveTo(player.x+17,player.y); ctx.lineTo(player.x,player.y+22); ctx.lineTo(player.x+34,player.y+22); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='#fff'; ctx.fillRect(player.x+14,player.y+8,6,8);
+  }
+  ctx.fillStyle='#ffe74d';
+  bullets.forEach(b=>ctx.fillRect(b.x,b.y,4,12));
+  ctx.fillStyle='#ff8a5d';
+  ebullets.forEach(b=>ctx.fillRect(b.x,b.y,5,10));
+  enemies.forEach(e=>{ if(e.alive) drawAlien(e); });
+  if(ufo) drawUFO(ufo);
+  if(giant) drawGiant(giant);
+  particles.forEach(p=>{ ctx.fillStyle=p.color; ctx.fillRect(p.x,p.y,4,4); });
+  if(giant){
+    ctx.fillStyle='#ffd94d'; ctx.font='bold 15px sans-serif'; ctx.textAlign='center';
+    ctx.fillText('合体敵 HP '+giant.hp, 240, 24); ctx.textAlign='left';
+  }
+}
+function shoot(){ if(running && player && bullets.length<4) bullets.push({x:player.x+15,y:player.y-12}); }
+
+function startMerge(){
+  // UFOに近いエイリアンを最大4体吸収して合体
+  const alive=enemies.filter(e=>e.alive);
+  alive.sort((a,b)=>Math.abs((a.x+15)-(ufo.x+24))-Math.abs((b.x+15)-(ufo.x+24)));
+  const absorbed=alive.slice(0,4);
+  absorbed.forEach(e=>{ e.alive=false; burst(e.x+15,e.y+11,'#ffd94d',6); });
+  burst(ufo.x+24,ufo.y+9,'#c0c8ff',18);
+  giant={x:Math.max(4,Math.min(376,ufo.x-26)), y:34, w:100, h:58, hp:20, maxhp:20, dir:1, timer:0};
+  ufo=null; mergeFlash=20;
+  msgEl.textContent='⚠ 合体！ 巨大な敵が現れた！';
+}
+function hitPlayer(){
+  if(invincible>0) return;
+  burst(player.x+17,player.y+11,'#5dc8ff',16);
+  player.lives--;
+  livesEl.textContent='残機: '+'❤'.repeat(Math.max(0,player.lives));
+  ebullets=[];
+  if(player.lives<=0){ running=false; msgEl.textContent='💥 ゲームオーバー スコア '+score; }
+  else { invincible=150; player.x=225; msgEl.textContent='やられた！ 残機あと'+player.lives; }
+}
+function step(){
+  if(running && player){
+    frame++;
+    if(invincible>0) invincible--;
+    if(mergeFlash>0) mergeFlash--;
+    if(keys.left) player.x=Math.max(0,player.x-player.speed);
+    if(keys.right) player.x=Math.min(446,player.x+player.speed);
+    bullets.forEach(b=>b.y-=9);
+    bullets=bullets.filter(b=>b.y>-15);
+    ebullets.forEach(b=>{ b.x+=b.vx; b.y+=b.vy; });
+    ebullets=ebullets.filter(b=>b.y<530 && b.x>-10 && b.x<490);
+    particles.forEach(p=>{ p.x+=p.vx; p.y+=p.vy; p.life--; });
+    particles=particles.filter(p=>p.life>0);
+
+    // 敵編隊の移動
+    enemyTimer++;
+    const alive=enemies.filter(e=>e.alive);
+    const interval=Math.max(7, 24-(32-alive.length)*0.5-(wave-1)*2);
+    if(enemyTimer>=interval){
+      enemyTimer=0;
+      let hitEdge=false;
+      alive.forEach(e=>{ e.x+=dir*10; if(e.x<8||e.x>442) hitEdge=true; });
+      if(hitEdge){ dir*=-1; alive.forEach(e=>{ e.x+=dir*10; e.y+=18; }); }
+    }
+
+    // UFO出現
+    if(!ufo && !giant){
+      ufoTimer--;
+      if(ufoTimer<=0){
+        const fromLeft=Math.random()<0.5;
+        ufo={x:fromLeft?-52:484, y:16, w:48, h:18, dir:fromLeft?1:-1};
+        msgEl.textContent='🛸 UFO接近中！ 撃ち落とす(+300)か、合体させるか…？';
+      }
+    }
+    if(ufo){
+      ufo.x+=ufo.dir*1.2;
+      const aliveNow=enemies.filter(e=>e.alive);
+      if(aliveNow.length>=2){
+        // 編隊の中心付近に来たら合体（端から中心までは撃ち落とす猶予）
+        const minX=Math.min(...aliveNow.map(e=>e.x)), maxX=Math.max(...aliveNow.map(e=>e.x+e.w));
+        const center=(minX+maxX)/2;
+        if(Math.abs((ufo.x+24)-center)<60) startMerge();
+      }
+      if(ufo && (ufo.x<-70 || ufo.x>500)){ ufo=null; ufoTimer=600; }
+    }
+
+    // 合体敵の動きと攻撃
+    if(giant){
+      giant.x+=giant.dir*1.6;
+      if(giant.x<4 || giant.x>376) giant.dir*=-1;
+      giant.y+=0.12;
+      giant.timer++;
+      if(giant.timer>=78){
+        giant.timer=0;
+        const cx=giant.x+50, cy=giant.y+giant.h;
+        ebullets.push({x:cx,y:cy,vx:-1.1,vy:3.2},{x:cx,y:cy,vx:1.1,vy:3.2});
+      }
+      if(giant.y+giant.h>=player.y) { running=false; msgEl.textContent='💥 合体敵に押しつぶされた… スコア '+score; }
+    }
+
+    // 自弾の当たり判定
+    bullets.forEach(b=>{
+      if(b.y<-100) return;
+      if(ufo && b.x>ufo.x && b.x<ufo.x+ufo.w && b.y<ufo.y+ufo.h && b.y+12>ufo.y){
+        burst(ufo.x+24,ufo.y+9,'#c0c8ff',18); ufo=null; ufoTimer=600;
+        b.y=-999; addScore(300); msgEl.textContent='🛸 UFO撃墜！ ボーナス+300';
+        return;
+      }
+      if(giant && b.x>giant.x && b.x<giant.x+giant.w && b.y<giant.y+giant.h && b.y+12>giant.y){
+        b.y=-999; giant.hp--; burst(b.x,giant.y+giant.h,'#ffd94d',3);
+        if(giant.hp<=0){
+          burst(giant.x+50,giant.y+29,'#ff5d5d',30); giant=null; ufoTimer=700;
+          addScore(500); msgEl.textContent='🎉 合体敵を撃破！ +500';
+        }
+        return;
+      }
+      alive.forEach(e=>{
+        if(b.y<e.y+e.h && b.y+12>e.y && b.x>e.x && b.x<e.x+e.w){
+          e.alive=false; b.y=-999; burst(e.x+15,e.y+11,'#5dff8f',8);
+          addScore((4-e.row)*10);
+        }
+      });
+    });
+
+    // 敵弾が自機に命中
+    if(invincible<=0){
+      ebullets.forEach(b=>{
+        if(b.x>player.x && b.x<player.x+player.w && b.y>player.y && b.y<player.y+player.h){ b.y=9999; hitPlayer(); }
+      });
+    }
+
+    // 勝敗・次ウェーブ
+    const aliveAfter=enemies.filter(e=>e.alive);
+    if(aliveAfter.length===0 && !giant && running){
+      addScore(100);
+      wave++; msgEl.textContent='🎉 ウェーブクリア！ 第'+wave+'ウェーブ開始';
+      spawnWave();
+    }
+    if(enemies.some(e=>e.alive && e.y+e.h>=player.y)){ running=false; msgEl.textContent='💥 ゲームオーバー スコア '+score; }
+  }
+  draw();
+  requestAnimationFrame(step);
+}
+document.addEventListener('keydown',e=>{
+  if(e.code==='ArrowLeft') keys.left=true;
+  if(e.code==='ArrowRight') keys.right=true;
+  if(e.code==='Space'){ e.preventDefault(); shoot(); }
+});
+document.addEventListener('keyup',e=>{
+  if(e.code==='ArrowLeft') keys.left=false;
+  if(e.code==='ArrowRight') keys.right=false;
+});
+function hold(id, on, off){
+  const el=document.getElementById(id);
+  el.addEventListener('pointerdown',e=>{e.preventDefault(); on();});
+  el.addEventListener('pointerup',off); el.addEventListener('pointerleave',off);
+}
+hold('left',()=>keys.left=true,()=>keys.left=false);
+hold('right',()=>keys.right=true,()=>keys.right=false);
+document.getElementById('fire').addEventListener('pointerdown',e=>{e.preventDefault(); shoot();});
+document.getElementById('start').onclick=()=>{ reset(); };
+cv.addEventListener('pointermove',e=>{
+  if(!player) return;
+  const r=cv.getBoundingClientRect();
+  player.x=Math.max(0,Math.min(446,(e.clientX-r.left)/r.width*480-17));
+});
+// 初期画面
+player={x:225,y:470,w:34,h:22,lives:3}; bullets=[]; ebullets=[]; particles=[]; enemies=[];
+spawnWave(); running=false; step();
+</script>
+</body>
+</html>
