@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>アイテムパック｜NAWOMIDOUゲーム館</title>
+<style>
+  body{font-family:sans-serif;background:#070714;color:#eef;margin:0;padding:16px;text-align:center}
+  h1{font-size:24px;margin:8px 0}
+  p{color:#a9bed6;font-size:14px;line-height:1.6}
+  #wrap{max-width:456px;margin:0 auto}
+  canvas{width:100%;height:auto;background:#050510;border:2px solid #35507a;border-radius:10px;touch-action:none}
+  .hud{display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;margin:8px auto;font-weight:bold;font-size:15px}
+  #status{color:#ffd94d;min-height:1.4em;font-size:14px}
+  .btns{display:flex;gap:8px;justify-content:center;margin-top:10px;flex-wrap:wrap}
+  button{font-size:17px;padding:11px 16px;border-radius:999px;border:none;background:#24365e;color:#fff;cursor:pointer;min-width:56px;user-select:none;-webkit-user-select:none}
+  button:active{background:#3c5a94}
+  #beam{background:#c0392b;min-width:110px}
+  #start{background:#27ae60}
+  .dpad{display:grid;grid-template-columns:56px 56px 56px;gap:6px;justify-content:center;margin-top:10px}
+  .big{color:#ffd94d;font-weight:bold}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>🟡 アイテムパック</h1>
+  <p>パックマン風。エサを全部食べれば面クリア。名物は<span class="big">豊富なアイテム</span>：🔫ビーム（3発）／⚡スピードアップ／👻壁すり抜け／⏰ゴーストスロー／🍒ボーナス。パワーエサでゴーストを食べる従来の攻めも健在です。</p>
+  <div class="hud"><span id="score">スコア: 0</span><span id="lives">残機: ❤❤❤</span><span id="level">レベル: 1</span><span id="ammo">ビーム: 0</span></div>
+  <div id="status">スタートを押してね</div>
+  <canvas id="cv" width="456" height="504"></canvas>
+  <div class="dpad">
+    <span></span><button data-d="up">▲</button><span></span>
+    <button data-d="left">◀</button><button data-d="down">▼</button><button data-d="right">▶</button>
+  </div>
+  <div class="btns">
+    <button id="beam">🔫 ビーム</button>
+    <button id="start">▶ スタート／もう一度</button>
+  </div>
+</div>
+<script>
+const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+const scoreEl=document.getElementById('score'), livesEl=document.getElementById('lives'),
+      levelEl=document.getElementById('level'), ammoEl=document.getElementById('ammo'), statusEl=document.getElementById('status');
+const T=24, COLS=19, ROWS=21, W=456, H=504;
+const MAZE=[
+"###################",
+"#........#........#",
+"#.##.###.#.###.##.#",
+"#o##.###.#.###.##o#",
+"#.................#",
+"#.##.#.#####.#.##.#",
+"#....#...#...#....#",
+"####.###.#.###.####",
+"####.#.......#.####",
+"####.#.##.##.#.####",
+"......#.....#......",
+"####.#.#####.#.####",
+"####.#.......#.####",
+"####.#.#####.#.####",
+"#........#........#",
+"#.##.##..#..##.##.#",
+"#o.#.....P.....#.o#",
+"##.#.#.#####.#.#.##",
+"#....#...#...#....#",
+"#.######.#.######.#",
+"###################"];
+const DIRS={up:{x:0,y:-1},down:{x:0,y:1},left:{x:-1,y:0},right:{x:1,y:0},none:{x:0,y:0}};
+let walls=new Set(), pellets=new Set(), powers=new Set();
+let player, ghosts, score, level, state, stateT, frightT, chain;
+let item=null, itemSpawnT=0, beamFx=null, popups=[];
+const ITEM_TYPES=[
+  {k:'beam', icon:'🔫', name:'ビーム×3 ゲット！ スペース／ボタンで発射'},
+  {k:'speed', icon:'⚡', name:'スピードアップ！'},
+  {k:'wall', icon:'👻', name:'壁すり抜け！'},
+  {k:'slow', icon:'⏰', name:'ゴーストがスローに！'},
+  {k:'cherry', icon:'🍒', name:'チェリー +500'}
+];
+function key(tx,ty){ return tx+','+ty; }
+function buildMaze(){
+  walls=new Set(); pellets=new Set(); powers=new Set();
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++){
+    const c=MAZE[y][x];
+    if(c==='#') walls.add(key(x,y));
+    else if(c==='.') pellets.add(key(x,y));
+    else if(c==='o') powers.add(key(x,y));
+  }
+}
+function passable(tx,ty,forPlayer){
+  if(ty===10 && (tx<0||tx>=COLS)) return true; // トンネル
+  if(tx<0||tx>=COLS||ty<0||ty>=ROWS) return false;
+  if(forPlayer && player && player.wallT>0) return true;
+  return !walls.has(key(tx,ty));
+}
+function tileOf(e){ return {tx:Math.floor(e.x/T), ty:Math.floor(e.y/T)}; }
+function atCenter(e){
+  const cx=Math.round((e.x-T/2)/T), cy=Math.round((e.y-T/2)/T);
+  return Math.abs(e.x-(cx*T+T/2))<0.01 && Math.abs(e.y-(cy*T+T/2))<0.01;
+}
+function moveEntity(e,speed){
+  // 中心にいるときだけ方向決定コールバックを呼ぶ
+  if(atCenter(e)) e.onCenter && e.onCenter(e);
+  if(e.dir===DIRS.none) return;
+  let nx=e.x+e.dir.x*speed, ny=e.y+e.dir.y*speed;
+  // 次の中心を越えないようクランプ（中心で必ず止まれる）
+  if(e.dir.x>0){ const c=(Math.floor((e.x-T/2)/T)+1)*T+T/2; if(e.x<c && nx>c) nx=c; }
+  if(e.dir.x<0){ const c=(Math.ceil((e.x-T/2)/T)-1)*T+T/2; if(e.x>c && nx<c) nx=c; }
+  if(e.dir.y>0){ const c=(Math.floor((e.y-T/2)/T)+1)*T+T/2; if(e.y<c && ny>c) ny=c; }
+  if(e.dir.y<0){ const c=(Math.ceil((e.y-T/2)/T)-1)*T+T/2; if(e.y>c && ny<c) ny=c; }
+  e.x=nx; e.y=ny;
+  if(e.x<-T/2) e.x+=W+T; if(e.x>W+T/2) e.x-=W+T;
+}
+function makePlayer(){
+  return {x:9*T+T/2, y:16*T+T/2, dir:DIRS.none, want:DIRS.none, mouth:0,
+          speedT:0, wallT:0, beam:0,
+    onCenter(e){
+      const {tx,ty}=tileOf(e);
+      if(e.want!==DIRS.none && passable(tx+e.want.x, ty+e.want.y, true)) e.dir=e.want;
+      if(e.dir!==DIRS.none && !passable(tx+e.dir.x, ty+e.dir.y, true)) e.dir=DIRS.none;
+    }};
+}
+const GHOST_DEF=[
+  {color:'#ff3b30', mode:'chase'},
+  {color:'#ff9ff3', mode:'ahead'},
+  {color:'#48dbfb', mode:'ambush'},
+  {color:'#ffa502', mode:'shy'}
+];
+const SPAWNS=[{tx:9,ty:9},{tx:8,ty:10},{tx:9,ty:10},{tx:10,ty:10}];
+function makeGhost(i){
+  const s=SPAWNS[i];
+  const g={x:s.tx*T+T/2, y:s.ty*T+T/2, dir:DIRS.left, color:GHOST_DEF[i].color, mode:GHOST_DEF[i].mode,
+           waitT:i*200, state:'wait', respawnT:0, idx:i,
+    onCenter(e){
+      const {tx,ty}=tileOf(e);
+      const opts=Object.values(DIRS).filter(d=>d!==DIRS.none)
+        .filter(d=>!(d.x===-e.dir.x && d.y===-e.dir.y))
+        .filter(d=>passable(tx+d.x, ty+d.y, false));
+      if(!opts.length){ e.dir={x:-e.dir.x, y:-e.dir.y}; return; }
+      if(frightT>0){ e.dir=opts[Math.floor(Math.random()*opts.length)]; return; }
+      let target;
+      const pt=tileOf(player);
+      if(e.mode==='chase') target=pt;
+      else if(e.mode==='ahead') target={tx:pt.tx+player.dir.x*4, ty:pt.ty+player.dir.y*4};
+      else if(e.mode==='ambush') target=(Math.random()<0.5)?pt:{tx:9,ty:9};
+      else { const far=Math.hypot(tx-pt.tx,ty-pt.ty)>7; target=far?pt:{tx:1,ty:19}; }
+      let best=opts[0], bd=1e18;
+      opts.forEach(d=>{
+        const dist=Math.hypot(tx+d.x-target.tx, ty+d.y-target.ty) + (Math.random()<0.18? 3:0);
+        if(dist<bd){ bd=dist; best=d; }
+      });
+      e.dir=best;
+    }};
+  return g;
+}
+function resetPositions(){
+  player=makePlayer();
+  ghosts=GHOST_DEF.map((_,i)=>makeGhost(i));
+  frightT=0; chain=0; item=null; itemSpawnT=300; beamFx=null;
+}
+function reset(){
+  buildMaze();
+  score=0; level=1; player=null;
+  resetPositions();
+  player.lives=3;
+  state='play'; stateT=0;
+  updateHud(); statusEl.textContent='レベル1 スタート！';
+}
+function updateHud(){
+  scoreEl.textContent='スコア: '+score;
+  livesEl.textContent='残機: '+'❤'.repeat(Math.max(0,player?player.lives:0));
+  levelEl.textContent='レベル: '+level;
+  ammoEl.textContent='ビーム: '+(player?player.beam:0);
+}
+function addScore(n,x,y){ score+=n; if(x!==undefined) popups.push({x,y,text:'+'+n,life:45}); updateHud(); }
+function popup(text){ statusEl.textContent=text; }
+function fireBeam(){
+  if(state!=='play' || !player || player.beam<=0 || player.dir===DIRS.none) return;
+  player.beam--; updateHud();
+  const {tx,ty}=tileOf(player);
+  const path=[]; let cx=tx, cy=ty, hit=null;
+  for(let i=0;i<COLS+2;i++){
+    cx+=player.dir.x; cy+=player.dir.y;
+    if(cy===10 && (cx<0||cx>=COLS)){ path.push({tx:cx,ty:cy}); continue; }
+    if(cx<0||cx>=COLS||cy<0||cy>=ROWS||walls.has(key(cx,cy))) break;
+    path.push({tx:cx,ty:cy});
+    const g=ghosts.find(g=>g.state==='active' && tileOf(g).tx===cx && tileOf(g).ty===cy);
+    if(g){ hit=g; break; }
+  }
+  beamFx={path, dir:player.dir, life:12};
+  if(hit){
+    hit.state='respawn'; hit.respawnT=200;
+    addScore(200, hit.x, hit.y);
+    popup('ビーム命中！ +200');
+  }
+}
+function spawnItem(){
+  const open=[];
+  for(let y=1;y<ROWS-1;y++) for(let x=0;x<COLS;x++){
+    if(!walls.has(key(x,y))) open.push({tx:x,ty:y});
+  }
+  const p=open[Math.floor(Math.random()*open.length)];
+  const t=ITEM_TYPES[Math.floor(Math.random()*ITEM_TYPES.length)];
+  item={tx:p.tx, ty:p.ty, kind:t.k, icon:t.icon, name:t.name, life:720};
+}
+function takeItem(){
+  if(!item) return;
+  const {tx,ty}=tileOf(player);
+  if(tx!==item.tx||ty!==item.ty) return;
+  const it=item; item=null; itemSpawnT=420;
+  if(it.kind==='beam'){ player.beam+=3; popup(it.name); }
+  else if(it.kind==='speed'){ player.speedT=480; popup(it.name); }
+  else if(it.kind==='wall'){ player.wallT=360; popup(it.name); }
+  else if(it.kind==='slow'){ ghosts.forEach(g=>g.slowT=360); popup(it.name); }
+  else if(it.kind==='cherry'){ addScore(500, player.x, player.y-16); popup(it.name); }
+  updateHud();
+}
+function die(){
+  player.lives--; updateHud();
+  if(player.lives<=0){ state='over'; popup('💥 ゲームオーバー スコア '+score); }
+  else { state='dying'; stateT=100; popup('やられた！ 残機あと'+player.lives); }
+}
+function step(){
+  requestAnimationFrame(step);
+  if(!player){ draw(); return; }
+  if(state==='dying'){ stateT--; if(stateT<=0){ const lv=player.lives; resetPositions(); player.lives=lv; state='play'; } draw(); return; }
+  if(state==='clear'){ stateT--; if(stateT<=0){ level++; buildMaze(); const lv=player.lives, sc=score; resetPositions(); player.lives=lv; score=sc; state='play'; updateHud(); popup('レベル'+level+' スタート！'); } draw(); return; }
+  if(state!=='play'){ draw(); return; }
+  // タイマー
+  if(frightT>0){ frightT--; if(frightT===0) chain=0; }
+  if(player.speedT>0) player.speedT--;
+  if(player.wallT>0){ const {tx,ty}=tileOf(player); if(!walls.has(key(tx,ty))) player.wallT--; }
+  ghosts.forEach(g=>{ if(g.slowT>0) g.slowT--; });
+  // アイテム出現
+  if(!item){ itemSpawnT--; if(itemSpawnT<=0) spawnItem(); }
+  else { item.life--; if(item.life<=0){ item=null; itemSpawnT=300; } }
+  if(beamFx){ beamFx.life--; if(beamFx.life<=0) beamFx=null; }
+  popups.forEach(p=>{ p.y-=0.5; p.life--; }); popups=popups.filter(p=>p.life>0);
+  // プレイヤー
+  const pSpeed=Math.min(3.4,(2.2+level*0.05))*(player.speedT>0?1.45:1)*0.6; // 全体速度は人間に合わせて0.6倍（酒本さんの基準）
+  moveEntity(player, pSpeed);
+  player.mouth+=0.25;
+  takeItem();
+  // エサ
+  const {tx,ty}=tileOf(player);
+  if(pellets.has(key(tx,ty))){ pellets.delete(key(tx,ty)); addScore(10); }
+  if(powers.has(key(tx,ty))){ powers.delete(key(tx,ty)); addScore(50); frightT=Math.max(240, 480-(level-1)*40); chain=0; popup('パワーエサ！ ゴーストを食べられる'); }
+  if(pellets.size===0 && powers.size===0){ state='clear'; stateT=130; addScore(300); popup('🎉 面クリア！ ボーナス+300'); draw(); return; }
+  // ゴースト
+  ghosts.forEach(g=>{
+    if(g.state==='wait'){ g.waitT--; if(g.waitT<=0) g.state='active'; return; }
+    if(g.state==='respawn'){ g.respawnT--; if(g.respawnT<=0){ const s=SPAWNS[g.idx]; g.x=s.tx*T+T/2; g.y=s.ty*T+T/2; g.state='active'; } return; }
+    let gs=(1.9+level*0.08); if(frightT>0) gs=1.4; if(g.slowT>0) gs*=0.55;
+    moveEntity(g, Math.min(2.5,gs)*0.6);
+  });
+  // 接触
+  for(const g of ghosts){
+    if(g.state!=='active') continue;
+    if(Math.hypot(g.x-player.x, g.y-player.y)<15){
+      if(frightT>0){
+        chain++; const pts=[200,400,800,1600][Math.min(3,chain-1)];
+        addScore(pts, g.x, g.y);
+        g.state='respawn'; g.respawnT=200; popup('ゴーストを食べた！ +'+pts);
+      } else { die(); break; }
+    }
+  }
+  draw();
+}
+function drawGhost(g){
+  const x=g.x, y=g.y;
+  const fright=frightT>0 && g.state==='active';
+  ctx.fillStyle=fright? (frightT<150 && Math.floor(frightT/18)%2? '#f5f5f5':'#2436c9') : g.color;
+  if(g.state==='respawn'){ ctx.fillStyle='rgba(255,255,255,.25)'; }
+  ctx.beginPath();
+  ctx.arc(x, y+2, 10, Math.PI, 0);
+  ctx.lineTo(x+10, y+11);
+  for(let i=0;i<4;i++){ ctx.lineTo(x+10-5*i-2.5, y+8); ctx.lineTo(x+10-5*i-5, y+11); }
+  ctx.closePath(); ctx.fill();
+  if(fright){
+    ctx.fillStyle='#ffd9a0'; ctx.beginPath(); ctx.arc(x-4,y,2,0,Math.PI*2); ctx.arc(x+4,y,2,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='#ffd9a0'; ctx.beginPath(); ctx.moveTo(x-5,y+5); ctx.lineTo(x-2,y+3); ctx.lineTo(x+1,y+5); ctx.lineTo(x+4,y+3); ctx.stroke();
+  } else {
+    ctx.fillStyle='#fff';
+    ctx.beginPath(); ctx.arc(x-4+g.dir.x*2, y+g.dir.y*2, 3.4, 0, Math.PI*2); ctx.arc(x+4+g.dir.x*2, y+g.dir.y*2, 3.4, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle='#2436c9';
+    ctx.beginPath(); ctx.arc(x-4+g.dir.x*3.4, y+g.dir.y*3.4, 1.8, 0, Math.PI*2); ctx.arc(x+4+g.dir.x*3.4, y+g.dir.y*3.4, 1.8, 0, Math.PI*2); ctx.fill();
+  }
+}
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle='#0a0a2e';
+  walls.forEach(k=>{
+    const [x,y]=k.split(',').map(Number);
+    ctx.fillRect(x*T+1,y*T+1,T-2,T-2);
+  });
+  ctx.fillStyle='#ffd9a0';
+  pellets.forEach(k=>{
+    const [x,y]=k.split(',').map(Number);
+    ctx.beginPath(); ctx.arc(x*T+T/2, y*T+T/2, 3, 0, Math.PI*2); ctx.fill();
+  });
+  if(Math.floor(Date.now()/300)%2===0){
+    ctx.fillStyle='#ffe74d';
+    powers.forEach(k=>{
+      const [x,y]=k.split(',').map(Number);
+      ctx.beginPath(); ctx.arc(x*T+T/2, y*T+T/2, 7, 0, Math.PI*2); ctx.fill();
+    });
+  }
+  if(item){
+    ctx.font='17px sans-serif'; ctx.textAlign='center';
+    ctx.fillText(item.icon, item.tx*T+T/2, item.ty*T+T/2+6);
+    ctx.textAlign='left';
+  }
+  if(beamFx){
+    ctx.strokeStyle='rgba(255,80,60,.9)'; ctx.lineWidth=5;
+    beamFx.path.forEach(p=>{ ctx.beginPath(); ctx.moveTo(p.tx*T, p.ty*T+T/2); ctx.lineTo(p.tx*T+T, p.ty*T+T/2); ctx.stroke(); });
+    // 縦ビームは簡易表示（同じマスを塗る）
+    ctx.fillStyle='rgba(255,80,60,.85)';
+    beamFx.path.forEach(p=>ctx.fillRect(p.tx*T+ (beamFx.dir.x!==0?0:9), p.ty*T+(beamFx.dir.y!==0?0:9), beamFx.dir.x!==0?T:6, beamFx.dir.y!==0?T:6));
+  }
+  if(player){
+    const a=Math.atan2(player.dir.y, player.dir.x);
+    const m=player.dir===DIRS.none? 0.15 : Math.abs(Math.sin(player.mouth))*0.32;
+    ctx.fillStyle=player.wallT>0? 'rgba(255,231,77,.55)' : '#ffe74d';
+    ctx.beginPath();
+    ctx.moveTo(player.x, player.y);
+    ctx.arc(player.x, player.y, 11, a+m, a+Math.PI*2-m);
+    ctx.closePath(); ctx.fill();
+    if(player.speedT>0){ ctx.font='11px sans-serif'; ctx.fillStyle='#48dbfb'; ctx.fillText('⚡', player.x-5, player.y-14); }
+  }
+  ghosts.forEach(g=>{ if(g.state!=='wait'||g.waitT%40<30) drawGhost(g); });
+  ctx.fillStyle='#fff'; ctx.font='bold 14px sans-serif';
+  popups.forEach(p=>ctx.fillText(p.text, p.x-12, p.y));
+  if(state==='over'){
+    ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#fff'; ctx.font='bold 26px sans-serif'; ctx.textAlign='center';
+    ctx.fillText('ゲームオーバー', W/2, H/2);
+    ctx.textAlign='left';
+  }
+}
+document.addEventListener('keydown',e=>{
+  const map={ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',KeyW:'up',KeyS:'down',KeyA:'left',KeyD:'right'};
+  if(map[e.code]){ if(player) player.want=DIRS[map[e.code]]; e.preventDefault(); }
+  if(e.code==='Space'){ fireBeam(); e.preventDefault(); }
+});
+document.querySelectorAll('[data-d]').forEach(b=>{
+  b.addEventListener('pointerdown',e=>{ e.preventDefault(); if(player) player.want=DIRS[b.dataset.d]; });
+});
+document.getElementById('beam').addEventListener('pointerdown',e=>{ e.preventDefault(); fireBeam(); });
+document.getElementById('start').onclick=()=>{ reset(); };
+cv.addEventListener('pointerdown',e=>{
+  const r=cv.getBoundingClientRect();
+  const dx=(e.clientX-r.left)-cv.clientWidth/2, dy=(e.clientY-r.top)-cv.clientHeight/2;
+  if(player) player.want=Math.abs(dx)>Math.abs(dy)? (dx>0?DIRS.right:DIRS.left) : (dy>0?DIRS.down:DIRS.up);
+});
+buildMaze();
+player=makePlayer(); player.lives=3;
+ghosts=GHOST_DEF.map((_,i)=>makeGhost(i));
+state='idle'; updateHud();
+step();
+</script>
+</body>
+</html>
