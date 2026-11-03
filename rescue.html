@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>地盤レスキュー｜NAWOMIDOUゲーム館</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0b1026;color:#e8f6ff;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;padding:10px;min-height:100vh}
+  h1{font-size:22px;color:#ffe74d;margin:4px 0;letter-spacing:.08em}
+  .sub{font-size:12px;color:#9ad1ff;margin-bottom:8px}
+  #hud{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;font-size:14px;margin-bottom:6px;max-width:700px}
+  #hud b{color:#ffe74d}
+  #warn{height:20px;color:#ff8a5c;font-weight:bold;font-size:14px;text-align:center}
+  canvas{width:100%;max-width:672px;height:auto;background:#17100b;border:2px solid #35507a;border-radius:10px;touch-action:none}
+  .btns{display:flex;gap:8px;justify-content:center;margin-top:10px;flex-wrap:wrap}
+  button{background:#23365e;color:#e8f6ff;border:1px solid #4a6aa5;border-radius:8px;padding:10px 16px;font-size:15px;cursor:pointer;user-select:none;-webkit-user-select:none}
+  button:active{background:#35507a}
+  .pad{display:grid;grid-template-columns:repeat(3,58px);grid-template-rows:repeat(3,58px);gap:5px;margin-top:10px}
+  .pad button{padding:0;font-size:21px}
+  .pad .empty{visibility:hidden}
+  .actions{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;justify-content:center}
+  .how{max-width:672px;font-size:13px;line-height:1.75;color:#c9d9ea;margin:12px 0 20px;background:#101936;border:1px solid #2a4066;border-radius:10px;padding:12px 14px}
+  .how b{color:#ffe74d}
+</style>
+</head>
+<body>
+<h1>🛠️ 地盤レスキュー</h1>
+<div class="sub">掘って、支えて、水と地震から街を守れ！</div>
+<div id="hud">
+  <span>SCORE <b id="score">0</b></span>
+  <span>STAGE <b id="stage">1</b></span>
+  <span>残り <b id="lives">3</b></span>
+  <span>センサー <b id="sensors">5</b></span>
+  <span>支柱 <b id="pillars">0</b></span>
+  <span>次の地震 <b id="quake">26</b>秒</span>
+</div>
+<div id="warn"></div>
+<canvas id="cv" width="672" height="560"></canvas>
+<div class="btns"><button id="start">▶ スタート／もう一度</button></div>
+<div class="pad" aria-label="移動ボタン">
+  <span class="empty"></span><button data-dir="up">↑</button><span class="empty"></span>
+  <button data-dir="left">←</button><button data-dir="down">↓</button><button data-dir="right">→</button>
+  <span class="empty"></span><span class="empty"></span><span class="empty"></span>
+</div>
+<div class="actions">
+  <button id="pumpBtn">💨 エアジャッキ（長押し）</button>
+  <button id="pillarBtn">🪵 支柱を置く</button>
+</div>
+<div class="how">
+  <b>遊び方：</b>地中のセンサーを全部集めるとステージクリア。土を掘って進み、支柱パーツを取ったら、建物の下など大事な場所で支柱を置こう。<br>
+  <b>操作：</b>矢印キー／WASDで移動、スペース長押しでエアジャッキ、Xで支柱を置く、Pで一時停止。エアジャッキは<b>移動しながらでも使えます</b>（その間は少しゆっくり進み、ホースは空洞に沿って曲がります）。スマホは画面ボタンでも遊べます。<br>
+  <b>現代の災害要素：</b>約26秒ごとに地震が発生。掘りすぎると地盤が弱り、建物が沈むことがあります。青い地下水たまりを掘り抜くと水が噴き出し、自分も敵も流されます。落石と暴走モグラドローンにも注意！
+</div>
+<script>
+'use strict';
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+const COLS=16,ROWS=11,TILE=42,OX=0,OY=86,SPEED=0.6;
+const EMPTY=0,SOIL=1,ROCK=2,WATER=3,BOULDER=4,SUPPORT=5;
+const $=id=>document.getElementById(id);
+let grid=[],speck=[],sensors=[],pickups=[],boulders=[],enemies=[],flows=[];
+let player=null,buildings=[];
+let score=0,stage=1,lives=3,pillars=0,sensorTotal=5;
+let state='title',stateTimer=0,stageTime=0,nextQuake=26,quakeTime=0,shake=0;
+let keys={},wantDir=null,pumpHeld=false,pumpTimer=0,pumpTarget=null,pumpPath=[],msg='',msgTimer=0;
+let lastTs=0;
+
+const DIRS={up:{x:0,y:-1},down:{x:0,y:1},left:{x:-1,y:0},right:{x:1,y:0}};
+const inGrid=(x,y)=>x>=0&&x<COLS&&y>=0&&y<ROWS;
+const keyOf=(x,y)=>x+','+y;
+const cellOf=(px,py)=>({x:Math.floor((px-OX)/TILE),y:Math.floor((py-OY)/TILE)});
+const centerOf=(gx,gy)=>({x:OX+gx*TILE+TILE/2,y:OY+gy*TILE+TILE/2});
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const dist2=(a,b)=>{const dx=a.x-b.x,dy=a.y-b.y;return dx*dx+dy*dy;};
+
+function randCell(pred){
+  for(let i=0;i<300;i++){
+    const x=1+Math.floor(Math.random()*(COLS-2));
+    const y=Math.floor(Math.random()*ROWS);
+    if(pred(x,y))return{x,y};
+  }
+  return null;
+}
+function carve(x,y){if(inGrid(x,y)&&grid[y][x]===SOIL)grid[y][x]=EMPTY;}
+function connectedWater(sx,sy){
+  const seen=[],stack=[[sx,sy]],set=new Set([keyOf(sx,sy)]);
+  while(stack.length){
+    const [x,y]=stack.pop();seen.push({x,y});
+    for(const d of Object.values(DIRS)){
+      const nx=x+d.x,ny=y+d.y,k=keyOf(nx,ny);
+      if(inGrid(nx,ny)&&grid[ny][nx]===WATER&&!set.has(k)){set.add(k);stack.push([nx,ny]);}
+    }
+  }
+  return seen;
+}
+function makeStage(){
+  grid=Array.from({length:ROWS},()=>Array(COLS).fill(SOIL));
+  speck=Array.from({length:ROWS},()=>Array.from({length:COLS},()=>Math.random()));
+  sensors=[];pickups=[];boulders=[];enemies=[];flows=[];
+  // 開始地点と縦穴
+  grid[0][1]=EMPTY;grid[1][1]=EMPTY;grid[1][2]=EMPTY;
+  // 敵の小さな空洞
+  const spawns=[{x:13,y:2},{x:12,y:8},{x:7,y:9}];
+  if(stage>=3)spawns.push({x:4,y:5});
+  spawns.forEach((s,i)=>{
+    carve(s.x,s.y);carve(s.x-1,s.y);carve(s.x,s.y-1);
+    const c=centerOf(s.x,s.y);
+    enemies.push({x:c.x,y:c.y,dir:'left',wantDir:'left',inflate:0,decay:0,alive:true,home:s,turnCd:i*0.3});
+  });
+  // 硬い岩
+  for(let i=0;i<8;i++){
+    const p=randCell((x,y)=>y>0&&grid[y][x]===SOIL&&!(x<4&&y<3));
+    if(p)grid[p.y][p.x]=ROCK;
+  }
+  // 落石（下を掘ると落ちる）
+  for(let i=0;i<3;i++){
+    const p=randCell((x,y)=>y>=1&&y<=5&&grid[y][x]===SOIL&&grid[y+1]&&grid[y+1][x]===SOIL);
+    if(p){grid[p.y][p.x]=BOULDER;boulders.push({gx:p.x,gy:p.y,x:centerOf(p.x,p.y).x,y:centerOf(p.x,p.y).y,falling:false,vy:0,delay:0,rubble:false});}
+  }
+  // 地下水ポケット（2か所）
+  for(let pocket=0;pocket<2;pocket++){
+    const p=randCell((x,y)=>y>=3&&y<=9&&x>=2&&x<=13&&grid[y][x]===SOIL);
+    if(!p)continue;
+    grid[p.y][p.x]=WATER;
+    const extra=[[1,0],[0,1],[1,1],[-1,0]].slice(0,3+Math.floor(Math.random()*2));
+    extra.forEach(([dx,dy])=>{const x=p.x+dx,y=p.y+dy;if(inGrid(x,y)&&grid[y][x]===SOIL)grid[y][x]=WATER;});
+  }
+  // センサー（主に中層〜下層）
+  sensorTotal=5;
+  for(let i=0;i<sensorTotal;i++){
+    const p=randCell((x,y)=>y>=3&&grid[y][x]===SOIL&&!sensors.some(s=>s.x===x&&s.y===y));
+    if(p)sensors.push({x:p.x,y:p.y,taken:false});
+  }
+  // 支柱パーツ
+  for(let i=0;i<2;i++){
+    const p=randCell((x,y)=>y>=2&&y<=8&&grid[y][x]===SOIL&&!pickups.some(s=>s.x===x&&s.y===y));
+    if(p)pickups.push({x:p.x,y:p.y,taken:false,kind:'pillar'});
+  }
+  buildings=[{cols:[1,2,3,4],x:58,w:170,name:'住宅',sink:0,penalized:false},
+             {cols:[6,7,8,9],x:250,w:170,name:'学校',sink:0,penalized:false},
+             {cols:[11,12,13,14],x:442,w:170,name:'病院',sink:0,penalized:false}];
+  const c=centerOf(1,1);
+  player={x:c.x,y:c.y,dir:'down',alive:true,inv:2,anim:0};
+  wantDir=null;pumpTarget=null;pumpPath=[];pumpHeld=false;
+  stageTime=0;nextQuake=Math.max(19,27-stage);quakeTime=0;shake=0;
+}
+function resetGame(){score=0;stage=1;lives=3;pillars=0;makeStage();state='ready';stateTimer=1.2;updateHud();}
+function supportRatio(b){
+  let solid=0,total=0;
+  for(const x of b.cols)for(let y=0;y<5;y++){
+    total++;const v=grid[y][x];
+    if(v===SOIL||v===ROCK||v===BOULDER) solid++;
+    if(v===SUPPORT) solid+=1.6;
+  }
+  return solid/total;
+}
+function showMsg(t,sec=2){msg=t;msgTimer=sec;}
+function updateHud(){
+  $('score').textContent=score;$('stage').textContent=stage;$('lives').textContent=Math.max(0,lives);
+  $('sensors').textContent=sensors.filter(s=>!s.taken).length;$('pillars').textContent=pillars;
+  $('quake').textContent=state==='play'?Math.max(0,Math.ceil(nextQuake-stageTime)):'--';
+  const low=buildings.find(b=>supportRatio(b)<0.5&&b.sink<2);
+  if(state==='play'&&nextQuake-stageTime<=4&&nextQuake-stageTime>0)$('warn').textContent='⚠ 地震が近い！ 落石と地盤沈下に注意';
+  else if(state==='play'&&low)$('warn').textContent='⚠ '+low.name+'の下の地盤が弱っています。支柱で補強しよう';
+  else if(msgTimer>0)$('warn').textContent=msg;
+  else $('warn').textContent='';
+}
+function digCell(x,y){
+  if(!inGrid(x,y))return;
+  if(grid[y][x]===SOIL){
+    grid[y][x]=EMPTY;score+=2;
+    sensors.forEach(s=>{if(!s.taken&&s.x===x&&s.y===y){s.taken=true;score+=250;showMsg('📡 センサー設置完了！ +250');}});
+    pickups.forEach(s=>{if(!s.taken&&s.x===x&&s.y===y){s.taken=true;pillars=Math.min(3,pillars+1);score+=80;showMsg('🪵 支柱パーツを入手！ Xで設置');}});
+  }
+}
+function breachWater(x,y,dir){
+  const pocket=connectedWater(x,y);
+  pocket.forEach(c=>{grid[c.y][c.x]=EMPTY;});
+  // 空洞へ水を流す（BFSで最大42マス）
+  const q=pocket.map(c=>({x:c.x,y:c.y,dir})),seen=new Set(pocket.map(c=>keyOf(c.x,c.y))),cells=[];
+  while(q.length&&cells.length<46){
+    const cur=q.shift();cells.push(cur);
+    for(const [name,d] of Object.entries(DIRS)){
+      const nx=cur.x+d.x,ny=cur.y+d.y,k=keyOf(nx,ny);
+      if(inGrid(nx,ny)&&grid[ny][nx]===EMPTY&&!seen.has(k)){seen.add(k);q.push({x:nx,y:ny,dir:name});}
+    }
+  }
+  flows.push({cells:new Map(cells.map(c=>[keyOf(c.x,c.y),c.dir])),until:stageTime+4.5});
+  score+=50;showMsg('💧 地下水が噴き出した！ 流されやすいぞ +50',2.5);
+}
+function flowDirAt(px,py){
+  const c=cellOf(px,py);if(!inGrid(c.x,c.y))return null;
+  for(const f of flows){const d=f.cells.get(keyOf(c.x,c.y));if(d)return d;}
+  return null;
+}
+function solidForPlayer(v){return v===ROCK||v===BOULDER||v===SUPPORT;}
+function tryMove(ent,dt,speed,digging){
+  if(!ent.wantDir)return;
+  const want=DIRS[ent.wantDir],cur=DIRS[ent.dir]||DIRS.down;
+  // 逆向きは即反転
+  if(want.x===-cur.x&&want.y===-cur.y)ent.dir=ent.wantDir;
+  else if(ent.wantDir!==ent.dir){
+    // 軸が合ったところで曲がる
+    const cell=cellOf(ent.x,ent.y),cen=centerOf(cell.x,cell.y);
+    if(want.x!==0&&Math.abs(ent.y-cen.y)<=speed*dt+2) {ent.y=cen.y;ent.dir=ent.wantDir;}
+    if(want.y!==0&&Math.abs(ent.x-cen.x)<=speed*dt+2) {ent.x=cen.x;ent.dir=ent.wantDir;}
+  }
+  const d=DIRS[ent.dir];
+  let step=speed*dt*SPEED;
+  // 流され中は自分の移動が弱くなる
+  const fd=flowDirAt(ent.x,ent.y);
+  if(fd&&fd!==ent.dir)step*=0.35;
+  const nx=ent.x+d.x*(step+13),ny=ent.y+d.y*(step+13);
+  const c=cellOf(nx,ny);
+  if(!inGrid(c.x,c.y))return;
+  const v=grid[c.y][c.x];
+  if(digging&&v===WATER){breachWater(c.x,c.y,ent.dir);return;}
+  if(solidForPlayer(v))return;
+  if(!digging&&v===WATER)return;
+  ent.x+=d.x*step;ent.y+=d.y*step;
+  ent.x=clamp(ent.x,OX+15,OX+COLS*TILE-15);ent.y=clamp(ent.y,OY+15,OY+ROWS*TILE-15);
+  const now=cellOf(ent.x,ent.y);
+  if(digging)digCell(now.x,now.y);
+}
+function applyFlow(ent,dt,isPlayer){
+  const fd=flowDirAt(ent.x,ent.y);if(!fd)return;
+  const d=DIRS[fd];let step=118*dt*SPEED;
+  const nx=ent.x+d.x*(step+13),ny=ent.y+d.y*(step+13),c=cellOf(nx,ny);
+  if(inGrid(c.x,c.y)&&!solidForPlayer(grid[c.y][c.x])&&grid[c.y][c.x]!==WATER){
+    ent.x+=d.x*step;ent.y+=d.y*step;
+  } else if(!isPlayer){
+    ent.stun=Math.max(ent.stun||0,1.2);
+  }
+}
+function placePillar(){
+  if(state!=='play'||pillars<=0)return;
+  const c=cellOf(player.x,player.y),d=DIRS[player.dir],x=c.x+d.x,y=c.y+d.y;
+  if(!inGrid(x,y)||grid[y][x]!==EMPTY){showMsg('支柱は目の前の空いた穴に置けます');return;}
+  grid[y][x]=SUPPORT;pillars--;score+=30;showMsg('🪵 支柱を設置！ 地盤を補強した');
+}
+function hosePathTo(enemy){
+  // 柔らかいホースなので、直線でなくても空洞を通って敵まで届く（最大5マス）
+  const start=cellOf(player.x,player.y),goal=cellOf(enemy.x,enemy.y);
+  if(!inGrid(start.x,start.y)||!inGrid(goal.x,goal.y))return null;
+  const sk=keyOf(start.x,start.y),gk=keyOf(goal.x,goal.y);
+  if(sk===gk)return [start];
+  const prev=new Map([[sk,null]]),dist=new Map([[sk,0]]),q=[start];
+  while(q.length){
+    const cur=q.shift(),ck=keyOf(cur.x,cur.y),cd=dist.get(ck);
+    if(cd>=5)continue;
+    for(const d of Object.values(DIRS)){
+      const nx=cur.x+d.x,ny=cur.y+d.y,k=keyOf(nx,ny);
+      if(!inGrid(nx,ny)||prev.has(k))continue;
+      const isGoal=(nx===goal.x&&ny===goal.y);
+      if(!isGoal&&grid[ny][nx]!==EMPTY)continue;
+      prev.set(k,ck);dist.set(k,cd+1);
+      if(isGoal){
+        const path=[];let kk=gk;
+        while(kk){const [x,y]=kk.split(',').map(Number);path.unshift({x,y});kk=prev.get(kk);}
+        return path;
+      }
+      q.push({x:nx,y:ny});
+    }
+  }
+  return null;
+}
+function acquirePumpTarget(){
+  if(pumpTarget&&pumpTarget.alive){
+    const p=hosePathTo(pumpTarget);
+    if(p){pumpPath=p;return pumpTarget;}
+  }
+  let best=null,bestPath=null;
+  for(const e of enemies){
+    if(!e.alive)continue;
+    const p=hosePathTo(e);
+    if(p&&(!bestPath||p.length<bestPath.length)){best=e;bestPath=p;}
+  }
+  pumpPath=bestPath||[];
+  return best;
+}
+function killPlayer(reason){
+  if(state!=='play'||player.inv>0)return;
+  lives--;state='dying';stateTimer=1.25;showMsg(reason||'やられた！',1.2);updateHud();
+}
+function popEnemy(e){
+  e.alive=false;score+=200;showMsg('💥 モグラドローンを止めた！ +200');pumpTarget=null;pumpPath=[];
+}
+function triggerQuake(){
+  quakeTime=1.25;shake=1;
+  // 地盤沈下判定
+  buildings.forEach(b=>{
+    const r=supportRatio(b);
+    if(r<0.5&&b.sink<2){
+      b.sink++;score=Math.max(0,score-300);showMsg('🏚️ '+b.name+'が沈下した！ 地盤の掘りすぎに注意 -300',3);
+    }
+  });
+  if(buildings.every(b=>b.sink>=2)){state='gameover';showMsg('街の建物が全部沈んでしまった…');return;}
+  // 空洞の上に瓦礫を2つ落とす
+  let made=0,tries=0;
+  while(made<2&&tries<60){
+    tries++;const x=1+Math.floor(Math.random()*(COLS-2));
+    if(grid[0][x]===EMPTY){
+      boulders.push({gx:x,gy:-1,x:centerOf(x,0).x,y:OY-20,falling:true,vy:0,delay:0,rubble:true});made++;
+    }
+  }
+  nextQuake=stageTime+Math.max(19,27-stage);
+}
+function updateBoulders(dt){
+  for(const b of boulders){
+    if(b.dead)continue;
+    if(!b.falling){
+      const belowY=b.gy+1;
+      if(belowY<ROWS&&grid[belowY][b.gx]===EMPTY){
+        b.delay+=dt;
+        if(b.delay>0.35){grid[b.gy][b.gx]=EMPTY;b.falling=true;b.vy=0;}
+      } else b.delay=0;
+      continue;
+    }
+    b.vy=Math.min(260,b.vy+620*dt);b.y+=b.vy*dt*SPEED;
+    // 接触判定
+    if(state==='play'&&Math.abs(player.x-b.x)<27&&Math.abs(player.y-b.y)<27)killPlayer('落石に当たった！');
+    enemies.forEach(e=>{if(e.alive&&Math.abs(e.x-b.x)<29&&Math.abs(e.y-b.y)<29){e.alive=false;score+=300;showMsg('🪨 落石でドローンを倒した！ +300');}});
+    // 足下のマスが空きでなくなったら、その1つ上に着地する
+    const gx=clamp(cellOf(b.x,b.y).x,0,COLS-1);
+    const below=cellOf(b.x,b.y+18).y;
+    if(below>=ROWS||(below>=0&&grid[below][gx]!==EMPTY)){
+      if(b.rubble){b.dead=true;continue;}
+      const gy=below-1;
+      if(gy>=0&&grid[gy][gx]===EMPTY){b.gx=gx;b.gy=gy;b.x=centerOf(gx,gy).x;b.y=centerOf(gx,gy).y;grid[gy][gx]=BOULDER;b.falling=false;b.vy=0;b.delay=0;}
+      else b.dead=true;
+    }
+    if(b.y>OY+ROWS*TILE+30)b.dead=true;
+  }
+  boulders=boulders.filter(b=>!b.dead);
+}
+function updateEnemies(dt){
+  for(const e of enemies){
+    if(!e.alive)continue;
+    if(pumpTarget===e)continue;
+    if(e.stun>0){e.stun-=dt;continue;}
+    const cell=cellOf(e.x,e.y),cen=centerOf(cell.x,cell.y);
+    e.turnCd-=dt;
+    if(Math.abs(e.x-cen.x)<4&&Math.abs(e.y-cen.y)<4&&e.turnCd<=0){
+      e.turnCd=0.18;
+      const options=[];
+      for(const [name,d] of Object.entries(DIRS)){
+        const nx=cell.x+d.x,ny=cell.y+d.y;
+        if(!inGrid(nx,ny))continue;const v=grid[ny][nx];
+        if(v===ROCK||v===WATER||v===BOULDER||v===SUPPORT)continue;
+        const pc=cellOf(player.x,player.y);
+        const dist=Math.abs(pc.x-nx)+Math.abs(pc.y-ny);
+        options.push({name,dist,soil:v===SOIL});
+      }
+      options.sort((a,b)=>a.dist-b.dist||((a.soil?1:0)-(b.soil?1:0)));
+      if(options.length){
+        // たまにランダムにして単調さを防ぐ
+        e.wantDir=(Math.random()<0.18&&options[1])?options[1].name:options[0].name;
+      }
+    }
+    const here=grid[cell.y]&&grid[cell.y][cell.x];
+    const speed=here===SOIL?58:104;
+    // 敵は土を掘らずに潜行する（モグラドローン）
+    const before={x:e.x,y:e.y};tryMove(e,dt,speed,false);
+    if(before.x===e.x&&before.y===e.y)e.turnCd=0;
+    applyFlow(e,dt,false);
+    if(e.inflate>0){e.decay+=dt;if(e.decay>0.45){e.inflate--;e.decay=0;}}
+    if(state==='play'&&player.inv<=0&&Math.abs(player.x-e.x)<27&&Math.abs(player.y-e.y)<27)killPlayer('モグラドローンに捕まった！');
+  }
+}
+function update(dt){
+  if(msgTimer>0)msgTimer-=dt;
+  if(state==='ready'||state==='dying'||state==='clear'){
+    stateTimer-=dt;
+    if(stateTimer<=0){
+      if(state==='dying'){
+        if(lives<=0){state='gameover';}
+        else {const c=centerOf(1,1);player.x=c.x;player.y=c.y;player.inv=2.5;enemies.forEach(e=>{if(e.alive){const h=centerOf(e.home.x,e.home.y);e.x=h.x;e.y=h.y;e.inflate=0;}});state='play';}
+      } else if(state==='clear'){stage++;pillars=0;makeStage();state='ready';stateTimer=1.0;}
+      else state='play';
+    }
+    return;
+  }
+  if(state!=='play')return;
+  stageTime+=dt;player.anim+=dt;
+  if(player.inv>0)player.inv-=dt;
+  flows=flows.filter(f=>f.until>stageTime);
+  // 入力方向
+  if(keys.ArrowUp||keys.KeyW)wantDir='up';else if(keys.ArrowDown||keys.KeyS)wantDir='down';
+  else if(keys.ArrowLeft||keys.KeyA)wantDir='left';else if(keys.ArrowRight||keys.KeyD)wantDir='right';
+  player.wantDir=wantDir;
+  pumpHeld=!!(keys.Space||keys.KeyJ||touchPump);
+  // エアジャッキ中も移動できる（ホースを引きずるので少し遅くなる）
+  const here=cellOf(player.x,player.y),onSoil=grid[here.y]&&grid[here.y][here.x]===SOIL;
+  const baseSpeed=onSoil?94:142;
+  tryMove(player,dt,pumpHeld?baseSpeed*0.62:baseSpeed,true);
+  if(pumpHeld){
+    const t=acquirePumpTarget();
+    if(t){
+      if(pumpTarget!==t){pumpTarget=t;pumpTimer=0;}
+      pumpTimer+=dt;
+      if(pumpTimer>=0.24){pumpTimer=0;t.inflate++;t.decay=0;if(t.inflate>=4)popEnemy(t);}
+    } else {pumpTarget=null;pumpPath=[];pumpTimer=0;}
+  } else {pumpTarget=null;pumpPath=[];pumpTimer=0;}
+  applyFlow(player,dt,true);
+  updateEnemies(dt);updateBoulders(dt);
+  if(quakeTime>0){quakeTime-=dt;shake=Math.max(0,quakeTime/1.25);}
+  else if(stageTime>=nextQuake)triggerQuake();
+  if(sensors.every(s=>s.taken)){score+=1000;state='clear';stateTimer=1.6;showMsg('🎉 ステージクリア！ +1000',1.5);}
+  updateHud();
+}
+function drawBuilding(b){
+  const y=18+b.sink*10;
+  ctx.fillStyle=b.sink>=2?'#4b3a36':(supportRatio(b)<0.5?'#8a6f4d':'#6b7f95');
+  ctx.fillRect(b.x,y,b.w,54-b.sink*7);
+  ctx.fillStyle='#ffe74d';ctx.font='bold 13px sans-serif';ctx.textAlign='center';
+  ctx.fillText(b.name,b.x+b.w/2,y+20);
+  ctx.fillStyle='#dff6ff';
+  for(let i=0;i<4;i++)ctx.fillRect(b.x+18+i*38,y+30,18,12);
+  if(b.sink>0){ctx.strokeStyle='#ffb0a0';ctx.beginPath();ctx.moveTo(b.x+20,y+8);ctx.lineTo(b.x+52,y+28);ctx.lineTo(b.x+38,y+42);ctx.stroke();}
+}
+function draw(){
+  ctx.save();ctx.clearRect(0,0,cv.width,cv.height);
+  if(shake>0)ctx.translate((Math.random()-0.5)*10*shake,(Math.random()-0.5)*7*shake);
+  // 地上
+  const sky=ctx.createLinearGradient(0,0,0,OY);sky.addColorStop(0,'#79b7e8');sky.addColorStop(1,'#c8ecff');ctx.fillStyle=sky;ctx.fillRect(0,0,cv.width,OY);
+  buildings.forEach(drawBuilding);
+  ctx.fillStyle='#67a65a';ctx.fillRect(0,72,cv.width,14);
+  // 地下
+  for(let y=0;y<ROWS;y++)for(let x=0;x<COLS;x++){
+    const px=OX+x*TILE,py=OY+y*TILE,v=grid[y][x];
+    if(v===EMPTY){ctx.fillStyle='#090604';ctx.fillRect(px,py,TILE,TILE);}
+    else if(v===SOIL){
+      const shades=['#9b6335','#8d552d','#7d4826','#6f3f22','#63371f'];
+      ctx.fillStyle=shades[Math.min(4,Math.floor(y/3))];ctx.fillRect(px,py,TILE,TILE);
+      ctx.fillStyle='rgba(255,225,160,.35)';
+      const s=speck[y][x];ctx.fillRect(px+6+s*24,py+8+((s*37)%1)*22,4,3);ctx.fillRect(px+26-s*14,py+27,3,3);
+      // 地震前のひび
+      if(state==='play'&&nextQuake-stageTime<4&&((x*7+y*3)%6===0)){ctx.strokeStyle='#2d1a0d';ctx.beginPath();ctx.moveTo(px+8,py+4);ctx.lineTo(px+20,py+18);ctx.lineTo(px+15,py+34);ctx.stroke();}
+    } else if(v===ROCK){ctx.fillStyle='#565d66';ctx.fillRect(px,py,TILE,TILE);ctx.fillStyle='#78818c';ctx.beginPath();ctx.arc(px+21,py+21,14,0,7);ctx.fill();}
+    else if(v===WATER){ctx.fillStyle='#1267a8';ctx.fillRect(px,py,TILE,TILE);ctx.strokeStyle='#bdefff';ctx.beginPath();ctx.moveTo(px+5,py+17);ctx.bezierCurveTo(px+14,py+10,px+22,py+24,px+37,py+16);ctx.stroke();ctx.beginPath();ctx.moveTo(px+5,py+29);ctx.bezierCurveTo(px+14,py+22,px+22,py+36,px+37,py+28);ctx.stroke();}
+    else if(v===SUPPORT){ctx.fillStyle='#17110a';ctx.fillRect(px,py,TILE,TILE);ctx.fillStyle='#d79b32';ctx.fillRect(px+7,py+5,7,32);ctx.fillRect(px+28,py+5,7,32);ctx.fillRect(px+7,py+17,28,7);}
+  }
+  // センサーと支柱パーツ（土の中でも光って見える）
+  sensors.forEach(s=>{if(s.taken)return;const c=centerOf(s.x,s.y);ctx.fillStyle='#ffe74d';ctx.beginPath();ctx.arc(c.x,c.y,10+Math.sin(stageTime*5)*2,0,7);ctx.fill();ctx.fillStyle='#333';ctx.font='bold 12px sans-serif';ctx.textAlign='center';ctx.fillText('S',c.x,c.y+4);});
+  pickups.forEach(s=>{if(s.taken)return;const c=centerOf(s.x,s.y);ctx.fillStyle='#d79b32';ctx.fillRect(c.x-13,c.y-12,7,24);ctx.fillRect(c.x+6,c.y-12,7,24);ctx.fillRect(c.x-13,c.y-3,26,6);});
+  // 水流
+  flows.forEach(f=>{ctx.fillStyle='rgba(55,170,255,.48)';f.cells.forEach((dir,k)=>{const [x,y]=k.split(',').map(Number);ctx.fillRect(OX+x*TILE,OY+y*TILE,TILE,TILE);ctx.fillStyle='rgba(220,250,255,.65)';const cx=OX+x*TILE+21,cy=OY+y*TILE+21,d=DIRS[dir];ctx.beginPath();ctx.moveTo(cx+d.x*12,cy+d.y*12);ctx.lineTo(cx-d.y*7-d.x*8,cy+d.x*7-d.y*8);ctx.lineTo(cx+d.y*7-d.x*8,cy-d.x*7-d.y*8);ctx.fill();ctx.fillStyle='rgba(55,170,255,.48)';});});
+  // 落石
+  boulders.forEach(b=>{ctx.fillStyle='#747c86';ctx.beginPath();ctx.arc(b.x,b.y,18,0,7);ctx.fill();ctx.fillStyle='#9aa3ad';ctx.beginPath();ctx.arc(b.x-5,b.y-6,7,0,7);ctx.fill();if(!b.falling&&b.delay>0){ctx.strokeStyle='#ffe74d';ctx.strokeRect(b.x-19,b.y-19,38,38);}});
+  // エアジャッキのホース（空洞に沿って曲がる）と、未命中時のエア噴射
+  if(pumpHeld&&state==='play'&&player){
+    if(pumpTarget&&pumpTarget.alive&&pumpPath.length){
+      ctx.strokeStyle='#d9f6ff';ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(player.x,player.y);
+      pumpPath.slice(1).forEach(c=>{const p=centerOf(c.x,c.y);ctx.lineTo(p.x,p.y);});
+      ctx.lineTo(pumpTarget.x,pumpTarget.y);ctx.stroke();ctx.lineWidth=1;
+    } else {
+      const d=DIRS[player.dir];ctx.fillStyle='rgba(200,240,255,.85)';
+      for(const len of [26,44,62]){
+        const px=player.x+d.x*len,py=player.y+d.y*len,c=cellOf(px,py);
+        if(!inGrid(c.x,c.y)||grid[c.y][c.x]!==EMPTY)break;
+        ctx.beginPath();ctx.arc(px,py,6-(len/22),0,7);ctx.fill();
+      }
+    }
+  }
+  // 敵：モグラドローン
+  enemies.forEach(e=>{if(!e.alive)return;const r=17+e.inflate*4;ctx.fillStyle=e.inflate?'#ffb65c':'#d47f2e';ctx.beginPath();ctx.arc(e.x,e.y,r,0,7);ctx.fill();ctx.fillStyle='#59636e';ctx.beginPath();ctx.moveTo(e.x+(DIRS[e.dir].x*22),e.y+(DIRS[e.dir].y*22));ctx.lineTo(e.x-8,e.y-8);ctx.lineTo(e.x+8,e.y+8);ctx.fill();ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(e.x-6,e.y-5,3.5,0,7);ctx.arc(e.x+6,e.y-5,3.5,0,7);ctx.fill();if(e.inflate){ctx.fillStyle='#fff';ctx.font='bold 13px sans-serif';ctx.textAlign='center';ctx.fillText(e.inflate,e.x,e.y+5);}});
+  // プレイヤー
+  if(player&&!(player.inv>0&&Math.floor(stageTime*10)%2===0&&state==='play')){
+    ctx.fillStyle='#ffcf3f';ctx.beginPath();ctx.arc(player.x,player.y-7,11,0,7);ctx.fill();
+    ctx.fillStyle='#1479c9';ctx.fillRect(player.x-13,player.y+1,26,16);
+    ctx.fillStyle='#ffe9a8';ctx.beginPath();ctx.arc(player.x,player.y-8,6,0,7);ctx.fill();
+    ctx.strokeStyle='#dfe8ee';ctx.lineWidth=4;const d=DIRS[player.dir];ctx.beginPath();ctx.moveTo(player.x+d.x*10,player.y+d.y*10);ctx.lineTo(player.x+d.x*23,player.y+d.y*23);ctx.stroke();ctx.lineWidth=1;
+  }
+  ctx.restore();
+  // 状態表示
+  ctx.textAlign='center';
+  if(state==='title'){overlay('地盤レスキュー','掘ってセンサーを集め、支柱で街を支えよう','スタートボタンを押してね');}
+  else if(state==='ready')overlay('STAGE '+stage,'センサー '+sensorTotal+'個を集めよう','');
+  else if(state==='dying')overlay('やられた！','残り '+Math.max(0,lives),'');
+  else if(state==='clear')overlay('STAGE CLEAR!','次の現場へ…','');
+  else if(state==='gameover')overlay('GAME OVER','SCORE '+score,'もう一度ボタンで再挑戦');
+  else if(state==='pause')overlay('一時停止中','Pキーで再開','');
+}
+function overlay(t,s1,s2){
+  ctx.fillStyle='rgba(3,6,18,.72)';ctx.fillRect(86,190,500,170);
+  ctx.strokeStyle='#ffe74d';ctx.strokeRect(86,190,500,170);
+  ctx.fillStyle='#ffe74d';ctx.font='bold 34px sans-serif';ctx.fillText(t,336,252);
+  ctx.fillStyle='#e8f6ff';ctx.font='18px sans-serif';ctx.fillText(s1,336,292);ctx.fillText(s2,336,322);
+}
+function loop(ts){
+  const dt=Math.min(0.05,(ts-lastTs)/1000||0);lastTs=ts;
+  if(state!=='pause')update(dt);
+  draw();requestAnimationFrame(loop);
+}
+let touchPump=false;
+window.addEventListener('keydown',e=>{
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code))e.preventDefault();
+  keys[e.code]=true;
+  if(e.code==='KeyX')placePillar();
+  if(e.code==='KeyP'){if(state==='play')state='pause';else if(state==='pause')state='play';}
+  if(e.code==='Enter'&&(state==='title'||state==='gameover'))resetGame();
+});
+window.addEventListener('keyup',e=>{keys[e.code]=false;});
+document.querySelectorAll('[data-dir]').forEach(btn=>{
+  const name=btn.dataset.dir;const code={up:'ArrowUp',down:'ArrowDown',left:'ArrowLeft',right:'ArrowRight'}[name];
+  const on=e=>{e.preventDefault();keys[code]=true;};const off=e=>{e.preventDefault();keys[code]=false;};
+  btn.addEventListener('pointerdown',on);btn.addEventListener('pointerup',off);btn.addEventListener('pointerleave',off);btn.addEventListener('pointercancel',off);
+});
+const pb=$('pumpBtn');
+pb.addEventListener('pointerdown',e=>{e.preventDefault();touchPump=true;});
+pb.addEventListener('pointerup',()=>touchPump=false);pb.addEventListener('pointerleave',()=>touchPump=false);
+$('pillarBtn').addEventListener('click',placePillar);
+$('start').addEventListener('click',resetGame);
+makeStage();draw();requestAnimationFrame(loop);
+</script>
+</body>
+</html>
