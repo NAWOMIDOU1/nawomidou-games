@@ -47,7 +47,7 @@ function spawnWave(){
     enemies.push({x:38+c*50, y:startY+r*42, w:30, h:22, alive:true, row:r});
 }
 function reset(){
-  player={x:225,y:470,w:34,h:22,speed:5,lives:3};
+  player={x:225,y:470,w:34,h:22,speed:3,lives:3};
   bullets=[]; ebullets=[]; particles=[]; score=0; running=true;
   ufo=null; giant=null; frame=0; ufoTimer=300; wave=1; invincible=0; mergeFlash=0;
   spawnWave();
@@ -144,7 +144,7 @@ function step(){
     if(mergeFlash>0) mergeFlash--;
     if(keys.left) player.x=Math.max(0,player.x-player.speed);
     if(keys.right) player.x=Math.min(446,player.x+player.speed);
-    bullets.forEach(b=>b.y-=9);
+    bullets.forEach(b=>b.y-=5.4);
     bullets=bullets.filter(b=>b.y>-15);
     ebullets.forEach(b=>{ b.x+=b.vx; b.y+=b.vy; });
     ebullets=ebullets.filter(b=>b.y<530 && b.x>-10 && b.x<490);
@@ -154,7 +154,7 @@ function step(){
     // 敵編隊の移動
     enemyTimer++;
     const alive=enemies.filter(e=>e.alive);
-    const interval=Math.max(7, 24-(32-alive.length)*0.5-(wave-1)*2);
+    const interval=Math.max(12, (24-(32-alive.length)*0.5-(wave-1)*2)*1.67);
     if(enemyTimer>=interval){
       enemyTimer=0;
       let hitEdge=false;
@@ -172,7 +172,7 @@ function step(){
       }
     }
     if(ufo){
-      ufo.x+=ufo.dir*1.2;
+      ufo.x+=ufo.dir*0.72;
       const aliveNow=enemies.filter(e=>e.alive);
       if(aliveNow.length>=2){
         // 編隊の中心付近に来たら合体（端から中心までは撃ち落とす猶予）
@@ -185,14 +185,14 @@ function step(){
 
     // 合体敵の動きと攻撃
     if(giant){
-      giant.x+=giant.dir*1.6;
+      giant.x+=giant.dir*0.96;
       if(giant.x<4 || giant.x>376) giant.dir*=-1;
-      giant.y+=0.12;
+      giant.y+=0.07;
       giant.timer++;
       if(giant.timer>=78){
         giant.timer=0;
         const cx=giant.x+50, cy=giant.y+giant.h;
-        ebullets.push({x:cx,y:cy,vx:-1.1,vy:3.2},{x:cx,y:cy,vx:1.1,vy:3.2});
+        ebullets.push({x:cx,y:cy,vx:-0.66,vy:1.92},{x:cx,y:cy,vx:0.66,vy:1.92});
       }
       if(giant.y+giant.h>=player.y) { running=false; msgEl.textContent='💥 合体敵に押しつぶされた… スコア '+score; }
     }

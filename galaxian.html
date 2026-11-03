@@ -55,7 +55,7 @@ function makeFormation(){
 }
 function slotPos(a){ return {x:anchor.x+a.col*40, y:anchor.y+a.row*34}; }
 function reset(){
-  player={x:223,y:516,w:34,h:22,speed:3.4,lives:3};
+  player={x:223,y:516,w:34,h:22,speed:2.04,lives:3};
   bullets=[]; ebullets=[]; particles=[]; score=0; running=true;
   frame=0; wave=1; diveT=150; grandT=540; grand=null; invincible=0;
   makeFormation();
@@ -75,7 +75,7 @@ function startSmallDive(){
   if(!cands.length) return;
   const a=cands[Math.floor(Math.random()*cands.length)];
   const p=slotPos(a);
-  a.state='dive'; a.t=0; a.dur=185; a.x0=p.x; a.y0=p.y;
+  a.state='dive'; a.t=0; a.dur=308; a.x0=p.x; a.y0=p.y;
   a.tx=player.x+(Math.random()*120-60); a.curve=(Math.random()<0.5?-1:1)*(60+Math.random()*80);
   a.shootT=40+Math.random()*50;
 }
@@ -88,7 +88,7 @@ function startGrand(){
     .sort((m,n)=>Math.hypot(slotPos(m).x-lp.x,slotPos(m).y-lp.y)-Math.hypot(slotPos(n).x-lp.x,slotPos(n).y-lp.y))
     .slice(0,7);
   const members=[leader,...others];
-  grand={t:0, dur:250, x0:lp.x, y0:lp.y, tx:player.x, curve:(Math.random()<0.5?-1:1)*90, members};
+  grand={t:0, dur:417, x0:lp.x, y0:lp.y, tx:player.x, curve:(Math.random()<0.5?-1:1)*90, members};
   members.forEach(a=>{
     const p=slotPos(a);
     a.state='grand'; a.offx=p.x-lp.x; a.offy=p.y-lp.y; a.inGrand=true;
@@ -158,14 +158,14 @@ function step(){
     if(keys.down) player.y+=player.speed;
     player.x=Math.max(0,Math.min(W-player.w,player.x));
     player.y=Math.max(ZONE_TOP,Math.min(H-player.h,player.y));
-    bullets.forEach(b=>b.y-=9);
+    bullets.forEach(b=>b.y-=5.4);
     bullets=bullets.filter(b=>b.y>-15);
     ebullets.forEach(b=>{ b.x+=b.vx; b.y+=b.vy; });
     ebullets=ebullets.filter(b=>b.y<H+15 && b.x>-12 && b.x<W+12);
     particles.forEach(p=>{ p.x+=p.vx; p.y+=p.vy; p.life--; });
     particles=particles.filter(p=>p.life>0);
     // 編隊の横移動
-    anchor.x+=anchor.dir*0.45;
+    anchor.x+=anchor.dir*0.27;
     if(anchor.x<6||anchor.x>74) anchor.dir*=-1;
     aliens.forEach(a=>{ if(a.state==='form'){ const p=slotPos(a); a.x=p.x; a.y=p.y; } });
     // 単体ダイブ
@@ -193,7 +193,7 @@ function step(){
         if(a.shootT<=0){
           a.shootT=55+Math.random()*70;
           const dx=player.x+17-(a.x+14);
-          ebullets.push({x:a.x+13,y:a.y+20,vx:Math.max(-1,Math.min(1,dx/160)),vy:3.6});
+          ebullets.push({x:a.x+13,y:a.y+20,vx:Math.max(-1,Math.min(1,dx/160))*0.6,vy:2.16});
         }
       }
     });
@@ -270,7 +270,7 @@ cv.addEventListener('pointermove',e=>{
   player.y=Math.max(ZONE_TOP,Math.min(H-player.h,(e.clientY-r.top)/r.height*H-11));
 });
 // 初期画面
-player={x:223,y:516,w:34,h:22,speed:3.4,lives:3};
+player={x:223,y:516,w:34,h:22,speed:2.04,lives:3};
 bullets=[]; ebullets=[]; particles=[]; makeFormation();
 aliens.forEach(a=>{ const p=slotPos(a); a.x=p.x; a.y=p.y; });
 running=false; step();

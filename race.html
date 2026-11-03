@@ -307,7 +307,7 @@ function loop(ts){
   if(state==='count'){ countT-=dt; if(countT<=0){ state='race'; } }
   if(state==='race'||state==='count'){
     if(state==='race') raceT+=dt/60;
-    cars.forEach(c=>{ if(c.isPlayer) stepPlayer(state==='race'?dt:0); else if(state==='race') stepAI(c,dt); });
+    cars.forEach(c=>{ if(c.isPlayer) stepPlayer(state==='race'?dt*0.6:0); else if(state==='race') stepAI(c,dt*0.6); });
     if(state==='race'){
       // 詰まって止まった車は、3秒後に少しの間すり抜けられるようにする
       cars.forEach(c=>{

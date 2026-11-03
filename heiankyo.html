@@ -43,12 +43,12 @@ const VB=[60,240,420], HB=[60,240,420], BAND=60; // 通り（縦・横）の開�
 let player, aliens, cars, holes, particles, score, running, keys={}, frame=0, wave=1, quota=5, buriedWave=0, spawnT=0, invincible=0;
 
 const LANES=[
-  {y:90,  dir:1,  speed:2.0, color:'#5dc8ff', timer:60},            // 北：1車線・一方通行
-  {y:250, dir:1,  speed:2.4, color:'#ff8a5d', timer:150, mid:true}, // 中央3車線：上段 →
-  {y:270, dir:1,  speed:1.8, color:'#ffd94d', timer:260, shuttle:true}, // 中央：行ったり来たり（常に1台だけ）
-  {y:290, dir:-1, speed:2.4, color:'#ff8a5d', timer:210, mid:true}, // 中央3車線：下段 ←
-  {y:438, dir:1,  speed:2.2, color:'#5dff8f', timer:110},           // 南：2車線 →
-  {y:462, dir:-1, speed:2.2, color:'#5dff8f', timer:190}            // 南：2車線 ←
+  {y:90,  dir:1,  speed:1.2, color:'#5dc8ff', timer:60},            // 北：1車線・一方通行
+  {y:250, dir:1,  speed:1.44, color:'#ff8a5d', timer:150, mid:true}, // 中央3車線：上段 →
+  {y:270, dir:1,  speed:1.08, color:'#ffd94d', timer:260, shuttle:true}, // 中央：行ったり来たり（常に1台だけ）
+  {y:290, dir:-1, speed:1.44, color:'#ff8a5d', timer:210, mid:true}, // 中央3車線：下段 ←
+  {y:438, dir:1,  speed:1.32, color:'#5dff8f', timer:110},           // 南：2車線 →
+  {y:462, dir:-1, speed:1.32, color:'#5dff8f', timer:190}            // 南：2車線 ←
 ];
 function isStreet(x,y){
   const inV=VB.some(b=>x>=b && x<=b+BAND), inH=HB.some(b=>y>=b && y<=b+BAND);
@@ -58,7 +58,7 @@ function canStand(x,y,r){
   return isStreet(x-r,y-r)&&isStreet(x+r,y-r)&&isStreet(x-r,y+r)&&isStreet(x+r,y+r);
 }
 function reset(){
-  player={x:270,y:505,r:11,speed:2.3,lives:3,actionT:0,fx:0,fy:-1};
+  player={x:270,y:505,r:11,speed:1.38,lives:3,actionT:0,fx:0,fy:-1};
   aliens=[]; cars=[]; holes=[]; particles=[]; score=0; running=true;
   frame=0; wave=1; quota=5; buriedWave=0; spawnT=30; invincible=0;
   LANES.forEach((l,i)=>l.timer=60+i*70);
@@ -127,7 +127,7 @@ function moveAlien(a){
     for(const o of shuffled){ if(canStand(a.x+o.x*14,a.y+o.y*14,a.r)){ chosen=o; break; } }
     a.dx=chosen.x; a.dy=chosen.y;
   }
-  const sp=Math.min(1.7, 1.02+wave*0.07);
+  const sp=Math.min(1.02, (1.02+wave*0.07)*0.6);
   const nx=a.x+a.dx*sp, ny=a.y+a.dy*sp;
   if(canStand(nx,ny,a.r)){ a.x=nx; a.y=ny; }
   else a.dirT=0;
@@ -314,7 +314,7 @@ hold('down',()=>keys.down=true,()=>keys.down=false);
 document.getElementById('act').addEventListener('pointerdown',e=>{e.preventDefault(); doAction();});
 document.getElementById('start').onclick=()=>{ reset(); };
 // 初期画面
-player={x:270,y:505,r:11,speed:2.3,lives:3,actionT:0,fx:0,fy:-1};
+player={x:270,y:505,r:11,speed:1.38,lives:3,actionT:0,fx:0,fy:-1};
 aliens=[]; cars=[]; holes=[]; particles=[]; running=false; wave=1; quota=5; buriedWave=0; step();
 </script>
 </body>
