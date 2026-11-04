@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>カエル横断中｜NAWOMIDOUゲーム館</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0b1026;color:#e8f6ff;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;padding:10px;min-height:100vh}
+  h1{font-size:22px;color:#8dff9a;margin:4px 0;letter-spacing:.08em}
+  .sub{font-size:12px;color:#9ad1ff;margin-bottom:8px}
+  #hud{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;font-size:14px;margin-bottom:6px;max-width:560px}
+  #hud b{color:#ffe74d}
+  #warn{height:20px;color:#ff8a5c;font-weight:bold;font-size:14px;text-align:center}
+  canvas{width:100%;max-width:520px;height:auto;background:#123;border:2px solid #35507a;border-radius:10px;touch-action:none}
+  .btns{display:flex;gap:8px;justify-content:center;margin-top:10px;flex-wrap:wrap}
+  button{background:#23365e;color:#e8f6ff;border:1px solid #4a6aa5;border-radius:8px;padding:10px 16px;font-size:15px;cursor:pointer;user-select:none;-webkit-user-select:none}
+  button:active{background:#35507a}
+  .pad{display:grid;grid-template-columns:repeat(3,58px);grid-template-rows:repeat(3,58px);gap:5px;margin-top:10px}
+  .pad button{padding:0;font-size:21px}
+  .pad .empty{visibility:hidden}
+  .how{max-width:520px;font-size:13px;line-height:1.75;color:#c9d9ea;margin:12px 0 20px;background:#101936;border:1px solid #2a4066;border-radius:10px;padding:12px 14px}
+  .how b{color:#ffe74d}
+</style>
+</head>
+<body>
+<h1>🐸 カエル横断中</h1>
+<div class="sub">洪水と汚染、外来種をかわして、向こう岸の池へ帰ろう！</div>
+<div id="hud">
+  <span>SCORE <b id="score">0</b></span>
+  <span>STAGE <b id="stage">1</b></span>
+  <span>残り <b id="lives">3</b></span>
+  <span>帰宅 <b id="homes">0/5</b></span>
+  <span>制限時間 <b id="time">90</b></span>
+</div>
+<div id="warn"></div>
+<canvas id="cv" width="520" height="520"></canvas>
+<div class="btns"><button id="start">▶ スタート／もう一度</button></div>
+<div class="pad" aria-label="移動ボタン">
+  <span class="empty"></span><button data-dir="up">↑</button><span class="empty"></span>
+  <button data-dir="left">←</button><button data-dir="down">↓</button><button data-dir="right">→</button>
+  <span class="empty"></span><span class="empty"></span><span class="empty"></span>
+</div>
+<div class="how">
+  <b>遊び方：</b>道路と川を渡って、向こう岸のハスの池（5か所）全部に帰ればステージクリア。川では丸太やカメに乗ること。水に落ちるとアウトです。<br>
+  <b>操作：</b>矢印キー／WASD、または画面ボタンで1マスずつ跳びます。Pで一時停止。<br>
+  <b>現代の脅威：</b>温暖化の<b>ゲリラ豪雨</b>が来ると洪水で川の流れが速くなります。川には<b>汚染ドラム缶</b>が流れ、豪雨のあとには道路に<b>汚染水たまり</b>が残って、踏むとしばらく動きが鈍ります。そして<b>外来種ウシガエル</b>が土手に現れて、こちらを追いかけてきます。
+</div>
+<script>
+'use strict';
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+const COLS=13,ROWS=13,TILE=40,W=520,H=520,SPEED=0.6;
+const $=id=>document.getElementById(id);
+let roadLanes=[],riverLanes=[],barrels=[],bullfrogs=[],puddles=[],homes=[];
+let frog=null,score=0,stage=1,lives=3,state='title',stateTimer=0,stageTime=0,timeLeft=90,bestRow=12;
+let floodNext=26,floodActive=0,bullTimer=9,keys={},msg='',msgTimer=0,lastTs=0;
+const stageMult=()=>Math.min(1.7,1+0.12*(stage-1));
+const riverMult=()=>stageMult()*(floodActive>0?1.6:1);
+const tileX=px=>Math.floor(px/TILE), tileY=py=>Math.floor(py/TILE);
+const ctr=g=>g*TILE+TILE/2;
+
+function makeLanes(){
+  const mk=(row,dir,speed,objs)=>({row,dir,speed,objs});
+  const spread=(n,gap,w,type)=>{const a=[];for(let i=0;i<n;i++)a.push({x:i*gap-(w*TILE)/2,w:w*TILE,type});return a;};
+  roadLanes=[
+    mk(11,-1,118,spread(3,230,1.1,'scooter')),
+    mk(10, 1, 92,spread(3,250,1.7,'car')),
+    mk( 9,-1, 74,spread(2,330,2.6,'truck')),
+    mk( 8, 1,104,spread(3,240,1.7,'car')),
+    mk( 7,-1, 60,spread(2,360,3.0,'bus')),
+  ];
+  riverLanes=[
+    mk(5, 1, 62,spread(2,330,4,'log')),
+    mk(4,-1, 80,spread(3,240,2.6,'turtle')),
+    mk(3, 1, 96,spread(3,250,3,'log')),
+    mk(2,-1, 74,spread(2,360,5,'log')),
+    mk(1, 1,108,spread(3,230,2.6,'turtle')),
+  ];
+  riverLanes.forEach(l=>l.objs.forEach((o,i)=>o.phase=i*2.1));
+  barrels=[{row:3,x:80},{row:3,x:330},{row:1,x:210}];
+}
+function resetFrog(){
+  frog={gx:6,gy:12,fx:ctr(6),fy:ctr(12),hopCd:0,hopAnim:0,sick:0,waterT:0,inv:1.2,dead:false};
+  bestRow=12;timeLeft=90;bullfrogs=[];
+}
+function makeStage(){
+  makeLanes();puddles=[];
+  homes=[1,3,6,8,11].map(col=>({col,filled:false}));
+  resetFrog();stageTime=0;floodNext=26;floodActive=0;bullTimer=9;
+}
+function resetGame(){score=0;stage=1;lives=3;makeStage();state='ready';stateTimer=1.1;updateHud();}
+function showMsg(t,sec=2.2){msg=t;msgTimer=sec;}
+function updateHud(){
+  $('score').textContent=score;$('stage').textContent=stage;$('lives').textContent=Math.max(0,lives);
+  $('homes').textContent=homes.filter(h=>h.filled).length+'/5';
+  $('time').textContent=Math.max(0,Math.ceil(timeLeft));
+  if(state==='play'&&floodActive>0)$('warn').textContent='🌧️ 洪水！ 川の流れが速くなっています';
+  else if(state==='play'&&floodNext-stageTime<=3)$('warn').textContent='⚠ ゲリラ豪雨が近づいています…';
+  else if(msgTimer>0)$('warn').textContent=msg;else $('warn').textContent='';
+}
+function die(reason){
+  if(state!=='play'||frog.inv>0)return;
+  lives--;state='dying';stateTimer=1.15;showMsg(reason,1.1);updateHud();
+}
+function hop(dir){
+  if(state!=='play'||frog.hopCd>0)return;
+  const d={up:[0,-1],down:[0,1],left:[-1,0],right:[1,0]}[dir];
+  let nx=frog.gx+d[0],ny=frog.gy+d[1];
+  if(nx<0||nx>=COLS||ny<0||ny>=ROWS)return;
+  if(ny===0){
+    const home=homes.find(h=>h.col===nx&&!h.filled);
+    if(!home)return; // 生け垣と帰宅済みの池には入れない
+    home.filled=true;score+=200;showMsg('🪷 帰宅成功！ +200');
+    if(homes.every(h=>h.filled)){score+=500;state='clear';stateTimer=1.6;showMsg('🎉 全員帰宅！ ステージクリア +500',1.5);}
+    else resetFrog();
+    updateHud();return;
+  }
+  frog.gx=nx;frog.gy=ny;frog.hopCd=frog.sick>0?0.30:0.17;frog.hopAnim=0.13;
+  if(ny<bestRow){bestRow=ny;score+=10;}
+  // 汚染水たまり
+  const p=puddles.find(p=>p.gx===nx&&p.gy===ny);
+  if(p&&frog.sick<=0){frog.sick=3;showMsg('☠️ 汚染水を踏んだ！ しばらく動きが鈍い');}
+}
+function spawnBullfrog(){
+  const side=Math.random()<0.5?0:COLS-1;
+  bullfrogs.push({gx:side,gy:6,fx:ctr(side),fy:ctr(6),hopT:0.5,life:13});
+  showMsg('🐸⚠ 外来種ウシガエルが現れた！');
+}
+function platformAt(px,py){
+  const row=tileY(py);
+  const lane=riverLanes.find(l=>l.row===row);
+  if(!lane)return null;
+  for(const o of lane.objs){
+    if(px>=o.x&&px<=o.x+o.w){
+      if(lane.objs[0].type==='turtle'){
+        const sub=Math.sin(stageTime*0.55+o.phase)>0.86; // 潜水タイミング
+        if(sub)return null;
+      }
+      return lane;
+    }
+  }
+  return null;
+}
+function update(dt){
+  if(msgTimer>0)msgTimer-=dt;
+  if(state==='ready'||state==='dying'||state==='clear'){
+    stateTimer-=dt;
+    if(stateTimer<=0){
+      if(state==='dying'){if(lives<=0)state='gameover';else{resetFrog();state='play';}}
+      else if(state==='clear'){stage++;makeStage();state='ready';stateTimer=1.0;}
+      else state='play';
+    }
+    return;
+  }
+  if(state!=='play')return;
+  stageTime+=dt;timeLeft-=dt;
+  if(timeLeft<=0){die('時間切れ…');return;}
+  if(frog.inv>0)frog.inv-=dt;
+  if(frog.hopCd>0)frog.hopCd-=dt;
+  if(frog.sick>0)frog.sick-=dt;
+  // 洪水スケジュール
+  if(floodActive>0){floodActive-=dt;if(floodActive<=0){
+    // 豪雨のあとに汚染水たまりが残る
+    for(let i=0;i<3;i++){puddles.push({gx:1+Math.floor(Math.random()*11),gy:6+Math.floor(Math.random()*6),until:stageTime+14});}
+    floodNext=stageTime+26+Math.random()*8;showMsg('道路に汚染水たまりが残った…',2.5);
+  }} else if(stageTime>=floodNext){floodActive=7;showMsg('🌧️ ゲリラ豪雨！ 洪水が始まった',2.5);}
+  puddles=puddles.filter(p=>p.until>stageTime);
+  // 車両と流れるもの
+  for(const l of roadLanes)for(const o of l.objs){o.x+=l.dir*l.speed*stageMult()*SPEED*dt;if(l.dir>0&&o.x>W+70)o.x=-o.w-70;if(l.dir<0&&o.x<-o.w-70)o.x=W+70;}
+  for(const l of riverLanes)for(const o of l.objs){o.x+=l.dir*l.speed*riverMult()*SPEED*dt;if(l.dir>0&&o.x>W+80)o.x=-o.w-80;if(l.dir<0&&o.x<-o.w-80)o.x=W+80;}
+  const bl3=riverLanes.find(l=>l.row===3),bl1=riverLanes.find(l=>l.row===1);
+  barrels.forEach(b=>{const l=b.row===3?bl3:bl1;b.x+=l.dir*l.speed*riverMult()*SPEED*0.92*dt;if(l.dir>0&&b.x>W+40)b.x=-40;if(l.dir<0&&b.x<-40)b.x=W+40;});
+  // 跳んだ直後だけ見た目位置をマスへ寄せる（川では流れに乗る位置を保つ）
+  if(frog.hopAnim>0){
+    frog.hopAnim-=dt;
+    frog.fx+=(ctr(frog.gx)-frog.fx)*Math.min(1,dt*18);
+    frog.fy+=(ctr(frog.gy)-frog.fy)*Math.min(1,dt*18);
+  }
+  const row=frog.gy;
+  // 川：流れに乗る／溺れる
+  if(row>=1&&row<=5){
+    const lane=platformAt(frog.fx,frog.fy);
+    if(lane){
+      frog.waterT=0;
+      const carry=lane.dir*lane.speed*riverMult()*SPEED*dt;
+      frog.fx+=carry;frog.gx=tileX(frog.fx);
+      if(frog.fx<8||frog.fx>W-8){die('流されてしまった…');return;}
+    } else {
+      frog.waterT+=dt;
+      if(frog.waterT>0.13){die('川に落ちた…');return;}
+    }
+  }
+  // 車両との衝突
+  if(row>=7&&row<=11){
+    const lane=roadLanes.find(l=>l.row===row);
+    if(lane)for(const o of lane.objs){
+      if(frog.fx+13>o.x+3&&frog.fx-13<o.x+o.w-3&&Math.abs(frog.fy-ctr(row))<26){die('車にはねられた…');return;}
+    }
+  }
+  // ドラム缶との衝突
+  for(const b of barrels){
+    if(b.row===row&&Math.abs(b.x-frog.fx)<25&&Math.abs(ctr(row)-frog.fy)<24){die('汚染ドラム缶に当たった…');return;}
+  }
+  // ウシガエル
+  bullTimer-=dt;
+  if(bullTimer<=0&&bullfrogs.length<(stage>=2?2:1)){spawnBullfrog();bullTimer=13+Math.random()*4;}
+  for(const bf of bullfrogs){
+    bf.life-=dt;bf.hopT-=dt;
+    bf.fx+=(ctr(bf.gx)-bf.fx)*Math.min(1,dt*10);bf.fy+=(ctr(bf.gy)-bf.fy)*Math.min(1,dt*10);
+    if(bf.hopT<=0){
+      bf.hopT=1.05;
+      const dx=frog.gx-bf.gx,dy=frog.gy-bf.gy;
+      if(Math.abs(dx)>=Math.abs(dy)&&dx!==0)bf.gx+=Math.sign(dx);
+      else if(dy!==0){const ny=bf.gy+Math.sign(dy);if(ny>=6&&ny<=12)bf.gy=ny;else if(dx!==0)bf.gx+=Math.sign(dx);}
+      bf.gx=Math.max(0,Math.min(COLS-1,bf.gx));
+    }
+    if(Math.abs(bf.fx-frog.fx)<27&&Math.abs(bf.fy-frog.fy)<27&&frog.inv<=0){die('ウシガエルに捕まった…');return;}
+  }
+  bullfrogs=bullfrogs.filter(b=>b.life>0);
+  updateHud();
+}
+function drawFrog(x,y,big,sick,enemy){
+  ctx.save();ctx.translate(x,y);if(big)ctx.scale(1.45,1.45);
+  ctx.fillStyle=enemy?'#7a8c2f':(sick?'#7fae56':'#43c94f');
+  ctx.beginPath();ctx.ellipse(0,2,14,11,0,0,7);ctx.fill();
+  ctx.beginPath();ctx.arc(-7,-7,5,0,7);ctx.arc(7,-7,5,0,7);ctx.fill();
+  ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(-7,-8,3.4,0,7);ctx.arc(7,-8,3.4,0,7);ctx.fill();
+  ctx.fillStyle='#101408';ctx.beginPath();ctx.arc(-7,-8,1.8,0,7);ctx.arc(7,-8,1.8,0,7);ctx.fill();
+  if(enemy){ctx.strokeStyle='#2c380f';ctx.lineWidth=2;ctx.beginPath();ctx.arc(0,4,8,0.15*Math.PI,0.85*Math.PI);ctx.stroke();}
+  ctx.restore();
+}
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // 背景：行ごとの帯
+  for(let r=0;r<ROWS;r++){
+    const y=r*TILE;
+    if(r===0){ctx.fillStyle='#2e6b2e';}
+    else if(r>=1&&r<=5){ctx.fillStyle='#1668a8';}
+    else if(r===6){ctx.fillStyle='#3f8f3f';}
+    else if(r>=7&&r<=11){ctx.fillStyle='#333842';}
+    else ctx.fillStyle='#3f8f3f';
+    ctx.fillRect(0,y,W,TILE);
+    if(r>=1&&r<=5){ctx.strokeStyle='rgba(190,230,255,.35)';ctx.beginPath();for(let i=0;i<3;i++){const yy=y+9+i*12;ctx.moveTo(0,yy);ctx.bezierCurveTo(W*0.3,yy-4,W*0.6,yy+4,W,yy);}ctx.stroke();}
+    if(r>=7&&r<=11){ctx.strokeStyle='rgba(255,255,255,.25)';ctx.setLineDash([14,16]);ctx.beginPath();ctx.moveTo(0,y+TILE-1);ctx.lineTo(W,y+TILE-1);ctx.stroke();ctx.setLineDash([]);}
+  }
+  // ゴールの池
+  homes.forEach(h=>{
+    const x=h.col*TILE;
+    ctx.fillStyle=h.filled?'#7fd069':'#1d4f1d';ctx.fillRect(x,2,TILE-2,TILE-4);
+    ctx.fillStyle='#57b24a';ctx.beginPath();ctx.ellipse(x+TILE/2-1,20,15,9,0,0,7);ctx.fill();
+    if(h.filled)drawFrog(x+TILE/2-1,20,0.8,false,false);
+    else {ctx.fillStyle='#ff9ff3';ctx.beginPath();ctx.arc(x+TILE/2-1,16,4,0,7);ctx.fill();}
+  });
+  // 汚染水たまり
+  puddles.forEach(p=>{ctx.fillStyle='rgba(150,60,190,.55)';ctx.beginPath();ctx.ellipse(ctr(p.gx),ctr(p.gy),17,10,0,0,7);ctx.fill();ctx.fillStyle='rgba(230,180,255,.8)';ctx.beginPath();ctx.arc(ctr(p.gx)-6,ctr(p.gy)-2,2.5,0,7);ctx.arc(ctr(p.gx)+5,ctr(p.gy)+2,2,0,7);ctx.fill();});
+  // 川の流れるもの
+  for(const l of riverLanes)for(const o of l.objs){
+    const y=ctr(l.row);
+    if(o.type==='log'||l.objs[0].type==='log'&&o.type===undefined){}
+    if((o.type||'log')==='log'){
+      ctx.fillStyle='#8a5a2b';ctx.beginPath();ctx.roundRect(o.x,y-13,o.w,26,12);ctx.fill();
+      ctx.fillStyle='#a9743d';ctx.beginPath();ctx.arc(o.x+12,y,8,0,7);ctx.arc(o.x+o.w-12,y,8,0,7);ctx.fill();
+    } else {
+      const sub=Math.sin(stageTime*0.55+o.phase)>0.86;
+      ctx.globalAlpha=sub?0.35:1;
+      for(let i=0;i<3;i++){const tx=o.x+22+i*((o.w-44)/2);ctx.fillStyle='#3f9e4d';ctx.beginPath();ctx.ellipse(tx,y,17,12,0,0,7);ctx.fill();ctx.fillStyle='#2c7038';ctx.beginPath();ctx.ellipse(tx,y,10,6,0,0,7);ctx.fill();}
+      ctx.globalAlpha=1;
+    }
+  }
+  // ドラム缶
+  barrels.forEach(b=>{const y=ctr(b.row);ctx.fillStyle='#8e44ad';ctx.fillRect(b.x-11,y-13,22,26);ctx.fillStyle='#c39bdB'.toLowerCase();ctx.fillRect(b.x-11,y-4,22,4);ctx.fillStyle='#fff';ctx.font='bold 11px sans-serif';ctx.textAlign='center';ctx.fillText('毒',b.x,y+10);});
+  // 車両
+  const carColors={car:'#e8b13c',truck:'#4a90d9',bus:'#e2603c',scooter:'#d9dee6'};
+  for(const l of roadLanes)for(const o of l.objs){
+    const y=ctr(l.row),c=carColors[o.type]||'#ccc';
+    ctx.fillStyle=c;ctx.beginPath();ctx.roundRect(o.x,y-13,o.w,26,7);ctx.fill();
+    ctx.fillStyle='rgba(20,30,50,.75)';
+    if(o.type==='car')ctx.fillRect(o.x+o.w*0.28,y-9,o.w*0.4,10);
+    if(o.type==='truck')ctx.fillRect(o.x+o.w*0.72,y-9,o.w*0.2,10);
+    if(o.type==='bus'){for(let i=0;i<5;i++)ctx.fillRect(o.x+8+i*(o.w-20)/5,y-9,10,10);}
+    if(o.type==='scooter'){ctx.fillStyle='#39445a';ctx.fillRect(o.x+o.w*0.3,y-8,o.w*0.3,8);}
+    ctx.fillStyle='#14181f';ctx.beginPath();ctx.arc(o.x+12,y+13,5,0,7);ctx.arc(o.x+o.w-12,y+13,5,0,7);ctx.fill();
+  }
+  // ウシガエルとカエル
+  bullfrogs.forEach(bf=>drawFrog(bf.fx,bf.fy,true,false,true));
+  if(frog&&!(frog.inv>0&&Math.floor(stageTime*10)%2===0&&state==='play'))drawFrog(frog.fx,frog.fy,false,frog.sick>0,false);
+  // 豪雨の雨
+  if(floodActive>0){ctx.strokeStyle='rgba(200,230,255,.6)';ctx.beginPath();for(let i=0;i<46;i++){const x=Math.random()*W,y=Math.random()*H;ctx.moveTo(x,y);ctx.lineTo(x-5,y+13);}ctx.stroke();
+    ctx.fillStyle='rgba(10,20,50,.16)';ctx.fillRect(0,0,W,H);}
+  ctx.textAlign='center';
+  if(state==='title')overlay('カエル横断中','洪水・汚染・外来種をかわして池へ帰ろう','スタートボタンを押してね');
+  else if(state==='ready')overlay('STAGE '+stage,'ハスの池 5か所全部に帰ろう','');
+  else if(state==='dying')overlay('やられた！','残り '+Math.max(0,lives),'');
+  else if(state==='clear')overlay('STAGE CLEAR!','次の川はもっと速い…','');
+  else if(state==='gameover')overlay('GAME OVER','SCORE '+score,'もう一度ボタンで再挑戦');
+  else if(state==='pause')overlay('一時停止中','Pキーで再開','');
+}
+function overlay(t,s1,s2){
+  ctx.fillStyle='rgba(3,6,18,.74)';ctx.fillRect(60,180,400,150);
+  ctx.strokeStyle='#8dff9a';ctx.strokeRect(60,180,400,150);
+  ctx.fillStyle='#8dff9a';ctx.font='bold 30px sans-serif';ctx.fillText(t,260,238);
+  ctx.fillStyle='#e8f6ff';ctx.font='16px sans-serif';ctx.fillText(s1,260,278);ctx.fillText(s2,260,304);
+}
+function loop(ts){
+  const dt=Math.min(0.05,(ts-lastTs)/1000||0);lastTs=ts;
+  if(state!=='pause')update(dt);
+  draw();requestAnimationFrame(loop);
+}
+const KEYMAP={ArrowUp:'up',KeyW:'up',ArrowDown:'down',KeyS:'down',ArrowLeft:'left',KeyA:'left',ArrowRight:'right',KeyD:'right'};
+window.addEventListener('keydown',e=>{
+  if(KEYMAP[e.code]||e.code==='Space')e.preventDefault();
+  if(KEYMAP[e.code])hop(KEYMAP[e.code]);
+  if(e.code==='KeyP'){if(state==='play')state='pause';else if(state==='pause')state='play';}
+  if(e.code==='Enter'&&(state==='title'||state==='gameover'))resetGame();
+});
+document.querySelectorAll('[data-dir]').forEach(btn=>{
+  btn.addEventListener('pointerdown',e=>{e.preventDefault();hop(btn.dataset.dir);});
+});
+$('start').addEventListener('click',resetGame);
+makeStage();draw();requestAnimationFrame(loop);
+</script>
+</body>
+</html>
