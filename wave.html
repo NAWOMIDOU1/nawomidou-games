@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>ウェーブフィールド｜NAWOMIDOUゲーム館</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0b1026;color:#e8f6ff;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;padding:10px;min-height:100vh}
+  h1{font-size:22px;color:#7df9ff;margin:4px 0;letter-spacing:.08em}
+  .sub{font-size:12px;color:#9ad1ff;margin-bottom:8px}
+  #hud{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;font-size:14px;margin-bottom:6px;max-width:600px}
+  #hud b{color:#ffe74d}
+  #warn{height:20px;color:#ff8a5c;font-weight:bold;font-size:14px;text-align:center}
+  canvas{width:100%;max-width:576px;height:auto;background:#05070f;border:2px solid #35507a;border-radius:10px;touch-action:none}
+  .btns{display:flex;gap:8px;justify-content:center;margin-top:10px;flex-wrap:wrap}
+  button{background:#23365e;color:#e8f6ff;border:1px solid #4a6aa5;border-radius:8px;padding:10px 16px;font-size:15px;cursor:pointer;user-select:none;-webkit-user-select:none}
+  button:active{background:#35507a}
+  .pad{display:grid;grid-template-columns:repeat(3,58px);grid-template-rows:repeat(3,58px);gap:5px;margin-top:10px}
+  .pad button{padding:0;font-size:21px}
+  .pad .empty{visibility:hidden}
+  .how{max-width:576px;font-size:13px;line-height:1.75;color:#c9d9ea;margin:12px 0 20px;background:#101936;border:1px solid #2a4066;border-radius:10px;padding:12px 14px}
+  .how b{color:#ffe74d}
+</style>
+</head>
+<body>
+<h1>〰️ ウェーブフィールド</h1>
+<div class="sub">線を引いて陣地を広げろ。ただし、分裂した電磁波を切り離すな！</div>
+<div id="hud">
+  <span>SCORE <b id="score">0</b></span>
+  <span>STAGE <b id="stage">1</b></span>
+  <span>残り <b id="lives">3</b></span>
+  <span>陣地 <b id="percent">0</b>% / 75%</span>
+  <span>電磁波 <b id="waveState">1つ</b></span>
+</div>
+<div id="warn"></div>
+<canvas id="cv" width="576" height="432"></canvas>
+<div class="btns"><button id="start">▶ スタート／もう一度</button></div>
+<div class="pad" aria-label="移動ボタン">
+  <span class="empty"></span><button data-dir="up">↑</button><span class="empty"></span>
+  <button data-dir="left">←</button><button data-dir="down">↓</button><button data-dir="right">→</button>
+  <span class="empty"></span><span class="empty"></span><span class="empty"></span>
+</div>
+<div class="how">
+  <b>遊び方：</b>フィールドに線を引いて囲い、陣地を75％以上に広げればクリア。引いている途中の線に電磁波が触れるとミス。線の上で止まっていると、根元からヒューズの火が迫ってきます。<br>
+  <b>操作：</b>矢印キー／WASD、または画面ボタンを押しっぱなしで移動。Pで一時停止。<br>
+  <b>独自ルール：</b>電磁波は時々<b>2つに分裂</b>します。分裂している間に囲いを完成させて、<b>2つの電磁波を別々の空間に切り離してしまうとミス</b>になります。2つが同じ空間に残る囲み方なら大丈夫。しばらくすると電磁波同士は引き合って合体します。
+</div>
+<script>
+'use strict';
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+const COLS=48,ROWS=36,CELL=12,W=576,H=432,SPEED=0.6;
+const FREE=0,CLAIMED=1,DRAW=2;
+const $=id=>document.getElementById(id);
+let grid=[],player=null,path=[],drawing=false,waves=[],spark=null;
+let score=0,stage=1,lives=3,state='title',stateTimer=0,stageTime=0;
+let splitState='single',splitTimer=14,idleTime=0,fuseIdx=-1,fuseTimer=0,moveTimer=0,heldDir=null;
+let keys={},msg='',msgTimer=0,lastTs=0,totalCells=COLS*ROWS;
+const DIRS={up:[0,-1],down:[0,1],left:[-1,0],right:[1,0]};
+const idx=(x,y)=>y*COLS+x, inG=(x,y)=>x>=0&&x<COLS&&y>=0&&y<ROWS;
+const cellPx=(px,py)=>({x:Math.floor(px/CELL),y:Math.floor(py/CELL)});
+
+function makeStage(){
+  grid=new Array(totalCells).fill(FREE);
+  for(let x=0;x<COLS;x++){grid[idx(x,0)]=CLAIMED;grid[idx(x,ROWS-1)]=CLAIMED;}
+  for(let y=0;y<ROWS;y++){grid[idx(0,y)]=CLAIMED;grid[idx(COLS-1,y)]=CLAIMED;}
+  player={x:24,y:ROWS-1,inv:1.5};
+  path=[];drawing=false;idleTime=0;fuseIdx=-1;
+  const sp=(95+stage*9)*SPEED;
+  waves=[{x:W*0.5,y:H*0.38,vx:sp*0.83,vy:sp*0.55,r:17,phase:0}];
+  splitState='single';splitTimer=13+Math.random()*5;
+  spark={x:0,y:0,moveT:0};
+  stageTime=0;
+}
+function resetGame(){score=0;stage=1;lives=3;makeStage();state='ready';stateTimer=1.1;updateHud();}
+function percent(){
+  let c=0;for(let i=0;i<totalCells;i++)if(grid[i]===CLAIMED)c++;
+  return Math.floor(c/totalCells*100);
+}
+function showMsg(t,sec=2.2){msg=t;msgTimer=sec;}
+function updateHud(){
+  $('score').textContent=score;$('stage').textContent=stage;$('lives').textContent=Math.max(0,lives);
+  $('percent').textContent=percent();
+  $('waveState').textContent=waves.length===2?'分裂中！':'1つ';
+  if(state==='play'&&waves.length===2)$('warn').textContent='⚡ 電磁波が分裂中！ 2つを切り離す囲み方はミスになる';
+  else if(msgTimer>0)$('warn').textContent=msg;else $('warn').textContent='';
+}
+function miss(reason){
+  if(state!=='play'||player.inv>0)return;
+  // 引いていた線を消す
+  path.forEach(c=>{grid[idx(c.x,c.y)]=FREE;});path=[];drawing=false;fuseIdx=-1;
+  lives--;state='dying';stateTimer=1.15;showMsg(reason,1.1);updateHud();
+}
+function components(){
+  // FREEセルの連結成分を返す（各成分はセルindexの配列）
+  const seen=new Uint8Array(totalCells),comps=[];
+  for(let i=0;i<totalCells;i++){
+    if(grid[i]!==FREE||seen[i])continue;
+    const comp=[],q=[i];seen[i]=1;
+    while(q.length){const cur=q.pop();comp.push(cur);const cx=cur%COLS,cy=(cur/COLS)|0;
+      for(const d of Object.values(DIRS)){const nx=cx+d[0],ny=cy+d[1];if(!inG(nx,ny))continue;const ni=idx(nx,ny);if(grid[ni]===FREE&&!seen[ni]){seen[ni]=1;q.push(ni);}}}
+    comps.push(comp);
+  }
+  return comps;
+}
+function completeClaim(){
+  const comps=components();
+  const waveComp=waves.map(w=>{
+    const c=cellPx(w.x,w.y);if(!inG(c.x,c.y))return -1;
+    for(let i=0;i<comps.length;i++)if(comps[i].includes(idx(c.x,c.y)))return i;
+    return -1;
+  });
+  if(waves.length===2&&waveComp[0]!==waveComp[1]){
+    miss('⚡ 分裂した電磁波を切り離してしまった！');
+    return false;
+  }
+  let gained=0;
+  const keep=new Set(waveComp.filter(i=>i>=0));
+  comps.forEach((comp,i)=>{if(!keep.has(i)){comp.forEach(ci=>{grid[ci]=CLAIMED;gained++;});}});
+  path.forEach(c=>{grid[idx(c.x,c.y)]=CLAIMED;gained++;});
+  path=[];drawing=false;fuseIdx=-1;idleTime=0;
+  score+=gained*2;
+  if(gained>0)showMsg('陣地 +'+Math.floor(gained/totalCells*100)+'%！');
+  if(percent()>=75){score+=500;state='clear';stateTimer=1.6;showMsg('🎉 ステージクリア！ +500',1.5);}
+  updateHud();
+  return true;
+}
+function tryStep(dir){
+  if(state!=='play')return;
+  const d=DIRS[dir],nx=player.x+d[0],ny=player.y+d[1];
+  if(!inG(nx,ny))return;
+  const v=grid[idx(nx,ny)];
+  idleTime=0;fuseIdx=-1;
+  if(drawing&&path.length&&nx===path[path.length-1].x&&ny===path[path.length-1].y){
+    // 自分の線を1マス戻る
+    const last=path.pop();grid[idx(last.x,last.y)]=FREE;
+    player.x=nx;player.y=ny;
+    if(!path.length)drawing=false;
+    return;
+  }
+  if(v===DRAW)return; // 自分の線とは交われない
+  player.x=nx;player.y=ny;
+  if(v===FREE){
+    grid[idx(nx,ny)]=DRAW;path.push({x:nx,y:ny});drawing=true;
+  } else if(v===CLAIMED&&drawing){
+    completeClaim();
+  }
+}
+function splitWave(){
+  if(waves.length!==1)return;
+  const w=waves[0],sp=Math.hypot(w.vx,w.vy);
+  waves=[
+    {x:w.x,y:w.y,vx:-w.vy,vy:w.vx,r:13,phase:0},
+    {x:w.x,y:w.y,vx:w.vy,vy:-w.vx,r:13,phase:2},
+  ];
+  waves.forEach(o=>{const m=Math.hypot(o.vx,o.vy)||1;o.vx=o.vx/m*sp;o.vy=o.vy/m*sp;});
+  splitState='split';splitTimer=9;
+  showMsg('⚡ 電磁波が2つに分裂した！',2.5);
+}
+function updateWaves(dt){
+  // 分裂タイマー
+  if(splitState==='single'){splitTimer-=dt;if(splitTimer<=0)splitWave();}
+  else if(splitState==='split'){splitTimer-=dt;if(splitTimer<=0)splitState='seeking';}
+  else if(splitState==='seeking'&&waves.length===2){
+    const [a,b]=waves,mx=(a.x+b.x)/2,my=(a.y+b.y)/2;
+    for(const w of waves){
+      const dx=mx-w.x,dy=my-w.y,m=Math.hypot(dx,dy)||1,sp=Math.hypot(w.vx,w.vy);
+      w.vx+= (dx/m*sp - w.vx)*Math.min(1,dt*1.6);
+      w.vy+= (dy/m*sp - w.vy)*Math.min(1,dt*1.6);
+    }
+    if(Math.hypot(a.x-b.x,a.y-b.y)<26){
+      const sp=(95+stage*9)*SPEED;
+      waves=[{x:mx,y:my,vx:sp*0.83,vy:sp*0.55,r:17,phase:0}];
+      splitState='single';splitTimer=13+Math.random()*6;
+      showMsg('電磁波が合体した');
+    }
+  }
+  for(const w of waves){
+    w.phase+=dt*7;
+    let nx=w.x+w.vx*dt,ny=w.y+w.vy*dt;
+    // 陣地セルで反射
+    const cx1=cellPx(nx+(w.vx>0?w.r:-w.r),w.y),cy1=cellPx(w.x,ny+(w.vy>0?w.r:-w.r));
+    if(inG(cx1.x,cx1.y)&&grid[idx(cx1.x,cx1.y)]===CLAIMED){w.vx*=-1;nx=w.x+w.vx*dt;}
+    if(inG(cy1.x,cy1.y)&&grid[idx(cy1.x,cy1.y)]===CLAIMED){w.vy*=-1;ny=w.y+w.vy*dt;}
+    w.x=Math.max(CELL+2,Math.min(W-CELL-2,nx));w.y=Math.max(CELL+2,Math.min(H-CELL-2,ny));
+    // 引いている線に触れたらミス
+    if(drawing){
+      const probes=[[w.x,w.y],[w.x+w.r,w.y],[w.x-w.r,w.y],[w.x,w.y+w.r],[w.x,w.y-w.r]];
+      for(const [px,py] of probes){const c=cellPx(px,py);if(inG(c.x,c.y)&&grid[idx(c.x,c.y)]===DRAW){miss('電磁波が線に触れた！');return;}}
+    }
+  }
+}
+function isBoundary(x,y){
+  if(grid[idx(x,y)]!==CLAIMED)return false;
+  for(const d of Object.values(DIRS)){const nx=x+d[0],ny=y+d[1];if(inG(nx,ny)&&grid[idx(nx,ny)]!==CLAIMED)return true;}
+  return false;
+}
+function updateSpark(dt){
+  if(!spark)return;
+  spark.moveT-=dt;
+  // プレイヤーと同じセルにいたらミス（陣地側にいる時）
+  if(!drawing&&spark.x===player.x&&spark.y===player.y){miss('ノイズに捕まった！');return;}
+  if(drawing&&path.length&&spark.x===path[0].x&&spark.y===path[0].y){
+    // 線の根元にノイズがいても、描画中はヒューズとは別扱い（接触は根元のみ無効）
+  }
+  if(spark.moveT>0)return;
+  spark.moveT=0.16;
+  let best=null,bestD=1e9;
+  for(const d of Object.values(DIRS)){
+    const nx=spark.x+d[0],ny=spark.y+d[1];
+    if(!inG(nx,ny)||!isBoundary(nx,ny))continue;
+    const dist=Math.abs(player.x-nx)+Math.abs(player.y-ny);
+    if(dist<bestD){bestD=dist;best={x:nx,y:ny};}
+  }
+  if(best){spark.x=best.x;spark.y=best.y;}
+  else {
+    // 境界が離れたら最寄りの境界セルへ
+    let bd=1e9;
+    for(let y=0;y<ROWS;y++)for(let x=0;x<COLS;x++)if(isBoundary(x,y)){const dist=Math.abs(player.x-x)+Math.abs(player.y-y);if(dist<bd){bd=dist;best={x,y};}}
+    if(best){spark.x=best.x;spark.y=best.y;}
+  }
+  if(!drawing&&spark.x===player.x&&spark.y===player.y)miss('ノイズに捕まった！');
+}
+function update(dt){
+  if(msgTimer>0)msgTimer-=dt;
+  if(state==='ready'||state==='dying'||state==='clear'){
+    stateTimer-=dt;
+    if(stateTimer<=0){
+      if(state==='dying'){
+        if(lives<=0)state='gameover';
+        else{player.x=24;player.y=ROWS-1;player.inv=1.5;state='play';}
+      } else if(state==='clear'){stage++;makeStage();state='ready';stateTimer=1.0;}
+      else state='play';
+    }
+    return;
+  }
+  if(state!=='play')return;
+  stageTime+=dt;
+  if(player.inv>0)player.inv-=dt;
+  // 移動（押しっぱなし）
+  heldDir=null;
+  if(keys.ArrowUp||keys.KeyW)heldDir='up';else if(keys.ArrowDown||keys.KeyS)heldDir='down';
+  else if(keys.ArrowLeft||keys.KeyA)heldDir='left';else if(keys.ArrowRight||keys.KeyD)heldDir='right';
+  moveTimer-=dt;
+  const interval=drawing?0.105:0.07;
+  if(heldDir&&moveTimer<=0){tryStep(heldDir);moveTimer=interval;}
+  if(!heldDir)moveTimer=0;
+  // ヒューズ：描画中に止まると根元から火が進む
+  if(drawing){
+    idleTime+=dt;
+    if(idleTime>1.4){
+      fuseTimer-=dt;
+      if(fuseIdx<0){fuseIdx=0;fuseTimer=0.09;}
+      else if(fuseTimer<=0){
+        fuseIdx++;fuseTimer=0.09;
+        if(fuseIdx>=path.length){miss('ヒューズの火が追いついた！');return;}
+      }
+    }
+  } else idleTime=0;
+  updateWaves(dt);
+  if(state!=='play')return;
+  updateSpark(dt);
+  updateHud();
+}
+function drawWave(w){
+  const pts=26;
+  for(const [col,lw] of [['rgba(125,249,255,.35)',7],['#7df9ff',2.5]]){
+    ctx.strokeStyle=col;ctx.lineWidth=lw;ctx.beginPath();
+    const ang=Math.atan2(w.vy,w.vx);
+    for(let i=0;i<=pts;i++){
+      const t=i/pts*2-1;
+      const lx=t*w.r*1.5,ly=Math.sin(t*5.2+w.phase)*w.r*0.52;
+      const rx=w.x+lx*Math.cos(ang)-ly*Math.sin(ang),ry=w.y+lx*Math.sin(ang)+ly*Math.cos(ang);
+      if(i===0)ctx.moveTo(rx,ry);else ctx.lineTo(rx,ry);
+    }
+    ctx.stroke();
+    ctx.beginPath();
+    for(let i=0;i<=pts;i++){
+      const t=i/pts*2-1;
+      const lx=Math.sin(t*5.2+w.phase)*w.r*0.52,ly=t*w.r*1.5;
+      const rx=w.x+lx*Math.cos(ang)-ly*Math.sin(ang),ry=w.y+lx*Math.sin(ang)+ly*Math.cos(ang);
+      if(i===0)ctx.moveTo(rx,ry);else ctx.lineTo(rx,ry);
+    }
+    ctx.stroke();
+  }
+  ctx.lineWidth=1;
+}
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // セル
+  for(let y=0;y<ROWS;y++)for(let x=0;x<COLS;x++){
+    const v=grid[idx(x,y)];
+    if(v===CLAIMED){ctx.fillStyle='#274b8f';ctx.fillRect(x*CELL,y*CELL,CELL,CELL);ctx.fillStyle='rgba(125,180,255,.25)';ctx.fillRect(x*CELL,y*CELL,CELL,2);}
+    else if(v===DRAW){ctx.fillStyle='#ffe74d';ctx.fillRect(x*CELL+2,y*CELL+2,CELL-4,CELL-4);}
+  }
+  // ヒューズの火
+  if(drawing&&fuseIdx>=0&&fuseIdx<path.length){
+    const f=path[fuseIdx];
+    ctx.fillStyle='#ff7b3c';ctx.beginPath();ctx.arc(f.x*CELL+6,f.y*CELL+6,6+Math.sin(stageTime*20)*1.5,0,7);ctx.fill();
+  }
+  // ノイズ（境界を巡回）
+  if(spark){ctx.fillStyle='#ff5da2';ctx.beginPath();ctx.arc(spark.x*CELL+6,spark.y*CELL+6,5,0,7);ctx.fill();ctx.fillStyle='#ffd7ec';ctx.beginPath();ctx.arc(spark.x*CELL+6,spark.y*CELL+6,2,0,7);ctx.fill();}
+  // 電磁波
+  waves.forEach(drawWave);
+  // プレイヤー
+  if(player&&!(player.inv>0&&Math.floor(stageTime*10)%2===0&&state==='play')){
+    ctx.fillStyle='#fff';ctx.fillRect(player.x*CELL+1,player.y*CELL+1,CELL-2,CELL-2);
+    ctx.fillStyle='#35507a';ctx.fillRect(player.x*CELL+4,player.y*CELL+4,CELL-8,CELL-8);
+  }
+  ctx.textAlign='center';
+  if(state==='title')overlay('ウェーブフィールド','線で囲って陣地75％を目指そう','スタートボタンを押してね');
+  else if(state==='ready')overlay('STAGE '+stage,'電磁波に触れずに線を引こう','');
+  else if(state==='dying')overlay('ミス！','残り '+Math.max(0,lives),'');
+  else if(state==='clear')overlay('STAGE CLEAR!','次の電磁波はもっと速い','');
+  else if(state==='gameover')overlay('GAME OVER','SCORE '+score,'もう一度ボタンで再挑戦');
+  else if(state==='pause')overlay('一時停止中','Pキーで再開','');
+}
+function overlay(t,s1,s2){
+  ctx.fillStyle='rgba(3,6,18,.74)';ctx.fillRect(88,140,400,150);
+  ctx.strokeStyle='#7df9ff';ctx.strokeRect(88,140,400,150);
+  ctx.fillStyle='#7df9ff';ctx.font='bold 29px sans-serif';ctx.fillText(t,288,196);
+  ctx.fillStyle='#e8f6ff';ctx.font='16px sans-serif';ctx.fillText(s1,288,236);ctx.fillText(s2,288,262);
+}
+function loop(ts){
+  const dt=Math.min(0.05,(ts-lastTs)/1000||0);lastTs=ts;
+  if(state!=='pause')update(dt);
+  draw();requestAnimationFrame(loop);
+}
+const KEYMAP={ArrowUp:'up',KeyW:'up',ArrowDown:'down',KeyS:'down',ArrowLeft:'left',KeyA:'left',ArrowRight:'right',KeyD:'right'};
+window.addEventListener('keydown',e=>{
+  if(KEYMAP[e.code]){e.preventDefault();keys[e.code]=true;}
+  if(e.code==='KeyP'){if(state==='play')state='pause';else if(state==='pause')state='play';}
+  if(e.code==='Enter'&&(state==='title'||state==='gameover'))resetGame();
+});
+window.addEventListener('keyup',e=>{keys[e.code]=false;});
+let touchDir=null;
+document.querySelectorAll('[data-dir]').forEach(btn=>{
+  const code={up:'ArrowUp',down:'ArrowDown',left:'ArrowLeft',right:'ArrowRight'}[btn.dataset.dir];
+  btn.addEventListener('pointerdown',e=>{e.preventDefault();keys[code]=true;});
+  btn.addEventListener('pointerup',()=>keys[code]=false);
+  btn.addEventListener('pointerleave',()=>keys[code]=false);
+  btn.addEventListener('pointercancel',()=>keys[code]=false);
+});
+$('start').addEventListener('click',resetGame);
+makeStage();draw();requestAnimationFrame(loop);
+</script>
+</body>
+</html>
