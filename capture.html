@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>里山ほかく隊｜NAWOMIDOUゲーム館</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#12240f;color:#f2f7e8;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;padding:10px;min-height:100vh}
+  h1{font-size:22px;color:#ffd54d;margin:4px 0;letter-spacing:.05em}
+  .sub{font-size:12px;color:#b9d99a;margin-bottom:8px}
+  #hud{display:flex;gap:14px;flex-wrap:wrap;justify-content:center;font-size:14px;margin-bottom:6px;max-width:600px}
+  #hud b{color:#ffd54d}
+  #warn{height:20px;color:#ff9d5c;font-weight:bold;font-size:14px;text-align:center}
+  canvas{width:100%;max-width:576px;height:auto;background:#a8bf8f;border:2px solid #4a6b35;border-radius:10px;touch-action:none}
+  .btns{display:flex;gap:8px;justify-content:center;margin-top:10px;flex-wrap:wrap}
+  button{background:#2e4a22;color:#f2f7e8;border:1px solid #5d8142;border-radius:8px;padding:10px 15px;font-size:15px;cursor:pointer;user-select:none;-webkit-user-select:none}
+  button:active{background:#43662f}
+  .pad{display:grid;grid-template-columns:repeat(3,58px);grid-template-rows:repeat(3,58px);gap:5px;margin-top:10px}
+  .pad button{padding:0;font-size:20px}
+  .pad .empty{visibility:hidden}
+  .ctl{display:flex;gap:8px;justify-content:center;margin-top:8px}
+  .ctl button{font-size:17px;padding:12px 26px}
+  .how{max-width:576px;font-size:13px;line-height:1.75;color:#dcebc9;margin:12px 0 20px;background:#1b3013;border:1px solid #3c5c2a;border-radius:10px;padding:12px 14px}
+  .how b{color:#ffd54d}
+</style>
+</head>
+<body>
+<h1>🎯 里山ほかく隊</h1>
+<div class="sub">住宅街に出た動物を、眠らせて、担いで、回収車へ！</div>
+<div id="hud">
+  <span>SCORE <b id="score">0</b></span>
+  <span>STAGE <b id="stage">1</b></span>
+  <span>捕獲 <b id="caught">0</b>/<b id="quota">5</b></span>
+  <span>命 <b id="lives">❤❤❤</b></span>
+  <span>燃料 <b id="fuel">100</b></span>
+</div>
+<div id="warn"></div>
+<canvas id="cv" width="576" height="432"></canvas>
+<div class="btns"><button id="start">▶ スタート／もう一度</button></div>
+<div class="pad" aria-label="移動ボタン">
+  <span class="empty"></span><button data-k="ArrowUp">↑</button><span class="empty"></span>
+  <button data-k="ArrowLeft">←</button><button data-k="ArrowDown">↓</button><button data-k="ArrowRight">→</button>
+  <span class="empty"></span><span class="empty"></span><span class="empty"></span>
+</div>
+<div class="ctl"><button id="bFire">🎯 発射</button></div>
+<div class="how">
+  <b>遊び方：</b>里山から住宅街に下りてきた動物を捕獲する作戦です。民家やアパートの間を動き回り、麻酔ダーツで眠らせたら、近づいて<b>担ぎ上げ、制限時間内に下の回収車まで運び込み</b>ます。途中で目覚めると振り出しです。建物はダーツも通しません。路地の使い方と、眠らせる場所選びが腕の見せどころ。起きている動物に触れると襲われてミス。回収車の燃料は減り続けるので手早く（捕獲で少し補給）。<br>
+  <b>動物たち：</b>ツキノワグマ（3発・300点）／イノシシ（2発・200点、近づくと突進）／アライグマ（1発・100点、外来種、すばしっこい）／カミツキガメ（2発・150点、外来種、池から出現）。<br>
+  <b>ボーナス：</b>全4種を1頭ずつ捕獲すると+600点と燃料+20。4種すべてを同時に眠らせると+1000点と燃料+40。<br>
+  <b>注意：</b>起きたクマが回収車に触れると、捕獲した動物を1頭逃がしてしまいます。<br>
+  <b>操作：</b>矢印キー／WASDで8方向移動（向いた方向に撃ちます）、スペースで発射。スマホは画面ボタンで。Pで一時停止。
+</div>
+<script>
+'use strict';
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+const W=576,H=432,SPEED=0.6;
+const $=id=>document.getElementById(id);
+const TRUCK={x:W/2,y:398};
+// 建物レイアウト（民家・アパートが障害物）
+const BUILDINGS=[
+  {x:30,y:106,w:54,h:40,kind:'house'},{x:138,y:100,w:96,h:48,kind:'apt'},
+  {x:288,y:106,w:54,h:40,kind:'house'},{x:396,y:100,w:100,h:48,kind:'apt'},
+  {x:30,y:202,w:96,h:48,kind:'apt'},{x:180,y:208,w:54,h:40,kind:'house'},
+  {x:288,y:202,w:96,h:48,kind:'apt'},{x:438,y:208,w:54,h:40,kind:'house'},
+  {x:108,y:308,w:54,h:40,kind:'house'},{x:216,y:304,w:100,h:48,kind:'apt'},
+  {x:370,y:308,w:54,h:40,kind:'house'},
+];
+let hunter=null,darts=[],animals=[],floats=[];
+let score=0,stage=1,caught=0,quota=5,lives=3,fuel=100,state='title',stateTimer=0,stageTime=0,spawnT=1;
+let capturedTypes=new Set(),capturedList=[],setBonusDone=false,allSleepBonusDone=false;
+let keys={},msg='',msgTimer=0,lastTs=0;
+const TYPES={
+  bear:  {emoji:'🐻',need:3,pts:300,r:21,label:'ツキノワグマ',sleep:12},
+  boar:  {emoji:'🐗',need:2,pts:200,r:19,label:'イノシシ',sleep:13},
+  raccoon:{emoji:'🦝',need:1,pts:100,r:15,label:'アライグマ',sleep:14},
+  turtle:{emoji:'🐢',need:2,pts:150,r:17,label:'カミツキガメ',sleep:16},
+};
+function collide(x,y,r){
+  let cx=false,cy=false;
+  for(const b of BUILDINGS){
+    const nx=Math.max(b.x,Math.min(x,b.x+b.w)),ny=Math.max(b.y,Math.min(y,b.y+b.h));
+    const dx=x-nx,dy=y-ny,d2=dx*dx+dy*dy;
+    if(d2<r*r){
+      if(d2===0){
+        const left=x-b.x,right=b.x+b.w-x,top=y-b.y,bottom=b.y+b.h-y;
+        const m=Math.min(left,right,top,bottom);
+        if(m===left){x=b.x-r;cx=true;}else if(m===right){x=b.x+b.w+r;cx=true;}
+        else if(m===top){y=b.y-r;cy=true;}else{y=b.y+b.h+r;cy=true;}
+      } else {
+        const d=Math.sqrt(d2),push=r-d,ux=dx/d,uy=dy/d;
+        x+=ux*push;y+=uy*push;
+        if(Math.abs(ux)>Math.abs(uy))cx=true;else cy=true;
+      }
+    }
+  }
+  return [x,y,cx,cy];
+}
+function pointInBuilding(x,y){
+  return BUILDINGS.some(b=>x>=b.x-1&&x<=b.x+b.w+1&&y>=b.y-1&&y<=b.y+b.h+1);
+}
+function makeStage(){
+  hunter={x:TRUCK.x,y:366,fx:0,fy:-1,cool:0,carry:null,inv:1.5};
+  darts=[];animals=[];floats=[];
+  caught=0;quota=4+stage;fuel=100;spawnT=0.6;stageTime=0;
+  capturedTypes=new Set();capturedList=[];setBonusDone=false;allSleepBonusDone=false;
+  for(let i=0;i<3;i++)spawnAnimal();
+}
+function resetGame(){score=0;stage=1;lives=3;makeStage();state='ready';stateTimer=1.1;updateHud();}
+function showMsg(t,sec=2.2){msg=t;msgTimer=sec;}
+function updateHud(){
+  $('score').textContent=score;$('stage').textContent=stage;
+  $('caught').textContent=caught;$('quota').textContent=quota;
+  $('lives').textContent='❤'.repeat(Math.max(0,lives));
+  $('fuel').textContent=Math.max(0,Math.ceil(fuel));
+  if(msgTimer>0)$('warn').textContent=msg;else $('warn').textContent='';
+}
+function spawnAnimal(forceType,atX,atY,asleepT){
+  const table=['bear','boar','raccoon','boar','raccoon','turtle'];
+  const type=forceType||table[Math.floor(Math.random()*table.length)];
+  const a={type,
+    x:atX!==undefined?atX:(type==='turtle'?60:30+Math.random()*(W-60)),
+    y:atY!==undefined?atY:(type==='turtle'?64:50+Math.random()*24),
+    ang:Math.PI/2+(Math.random()-0.5),dirT:1+Math.random()*2,dose:0,
+    state:asleepT?'sleep':'awake',sleepT:asleepT||0,timer:0,
+    chargeCd:1.5+Math.random()*2,charging:0,releaseCd:0,phase:Math.random()*7};
+  animals.push(a);return a;
+}
+function animalSpeed(a){
+  const base={bear:26,boar:40,raccoon:52,turtle:14}[a.type];
+  return base*SPEED*(1+(stage-1)*0.1)*(1-0.16*a.dose);
+}
+function fireDart(){
+  if(state!=='play'||hunter.cool>0)return;
+  hunter.cool=0.3;
+  const sp=380*SPEED*1.6;
+  darts.push({x:hunter.x+hunter.fx*18,y:hunter.y+hunter.fy*18,vx:hunter.fx*sp,vy:hunter.fy*sp,life:1.1});
+}
+function hitAnimal(a){
+  const T=TYPES[a.type];
+  a.dose++;
+  if(a.dose>=T.need&&a.state==='awake'){
+    a.state='sleep';a.sleepT=T.sleep;
+    floats.push({x:a.x,y:a.y-T.r-8,text:'💤 眠った！',t:1});
+    checkAllSleepBonus();
+  }
+}
+function checkAllSleepBonus(){
+  if(allSleepBonusDone)return;
+  const asleepTypes=new Set(animals.filter(a=>a.state==='sleep'||a.state==='carried').map(a=>a.type));
+  if(Object.keys(TYPES).every(t=>asleepTypes.has(t))){
+    allSleepBonusDone=true;score+=1000;fuel=Math.min(100,fuel+40);
+    showMsg('🌟 全種同時スリープ！ +1000・燃料+40',2.6);
+  }
+}
+function deliver(){
+  const a=hunter.carry;if(!a)return;
+  const T=TYPES[a.type];
+  a.state='gone';hunter.carry=null;
+  caught++;score+=T.pts;fuel=Math.min(100,fuel+8);
+  capturedTypes.add(a.type);capturedList.push(a.type);
+  floats.push({x:TRUCK.x,y:TRUCK.y-34,text:'捕獲 +'+T.pts,t:1.2});
+  if(!setBonusDone&&Object.keys(TYPES).every(t=>capturedTypes.has(t))){
+    setBonusDone=true;score+=600;fuel=Math.min(100,fuel+20);
+    showMsg('🌟 全種コンプリート！ +600・燃料+20',2.6);
+  }
+  if(caught>=quota){state='clear';stateTimer=1.6;score+=300;showMsg('🎉 ノルマ達成！ +300',1.5);}
+}
+function hunterHit(){
+  if(hunter.inv>0||state!=='play')return;
+  lives--;
+  if(hunter.carry){hunter.carry.state='sleep';hunter.carry=null;}
+  hunter.x=TRUCK.x;hunter.y=366;hunter.inv=2;
+  showMsg('襲われた！',1.4);
+  if(lives<=0)state='gameover';
+}
+function update(dt){
+  if(msgTimer>0)msgTimer-=dt;
+  if(state==='ready'||state==='clear'){
+    stateTimer-=dt;
+    if(stateTimer<=0){if(state==='clear'){stage++;makeStage();state='ready';stateTimer=1.0;}else state='play';}
+    return;
+  }
+  if(state!=='play')return;
+  stageTime+=dt;
+  fuel-=dt*1.0;
+  if(fuel<=0){fuel=0;state='gameover';updateHud();return;}
+  // ハンター移動
+  if(hunter.cool>0)hunter.cool-=dt;
+  if(hunter.inv>0)hunter.inv-=dt;
+  let mx=0,my=0;
+  if(keys.ArrowLeft||keys.KeyA)mx-=1;
+  if(keys.ArrowRight||keys.KeyD)mx+=1;
+  if(keys.ArrowUp||keys.KeyW)my-=1;
+  if(keys.ArrowDown||keys.KeyS)my+=1;
+  if(mx||my){
+    const m=Math.hypot(mx,my);mx/=m;my/=m;
+    hunter.fx=mx;hunter.fy=my;
+    const sp=150*SPEED*1.7*(hunter.carry?0.62:1);
+    let nx=Math.max(16,Math.min(W-16,hunter.x+mx*sp*dt));
+    let ny=Math.max(44,Math.min(410,hunter.y+my*sp*dt));
+    const res=collide(nx,ny,13);hunter.x=res[0];hunter.y=res[1];
+  }
+  if(keys.Space)fireDart();
+  // スポーン
+  spawnT-=dt;
+  const onField=animals.filter(a=>a.state!=='gone').length;
+  if(spawnT<=0&&onField<5){spawnAnimal();spawnT=2.2;}
+  // ダーツ
+  for(const d of darts){d.x+=d.vx*dt;d.y+=d.vy*dt;d.life-=dt;if(pointInBuilding(d.x,d.y))d.life=0;}
+  darts=darts.filter(d=>d.life>0&&d.x>0&&d.x<W&&d.y>36&&d.y<H);
+  // 動物
+  for(const a of animals){
+    const T=TYPES[a.type];a.phase+=dt*6;
+    if(a.releaseCd>0)a.releaseCd-=dt;
+    if(a.state==='carried'){a.x=hunter.x;a.y=hunter.y-24;continue;}
+    if(a.state==='sleep'){
+      a.sleepT-=dt;
+      if(a.sleepT<=0){a.state='awake';a.dose=0;floats.push({x:a.x,y:a.y-T.r-8,text:'目覚めた！',t:0.9,bad:true});}
+      continue;
+    }
+    if(a.dose>0){a.timer+=dt;if(a.timer>3){a.dose--;a.timer=0;}}
+    a.dirT-=dt;
+    if(a.dirT<=0){
+      a.dirT=1.2+Math.random()*2;
+      if(Math.random()<0.42)a.ang=Math.atan2(TRUCK.y-a.y,TRUCK.x-a.x)+(Math.random()-0.5)*0.9;
+      else a.ang=Math.random()*Math.PI*2;
+    }
+    let sp=animalSpeed(a);
+    if(a.type==='boar'){
+      a.chargeCd-=dt;
+      const dh=Math.hypot(hunter.x-a.x,hunter.y-a.y);
+      if(a.chargeCd<=0&&dh<190){a.charging=0.7;a.chargeCd=3+Math.random()*2;a.ang=Math.atan2(hunter.y-a.y,hunter.x-a.x);}
+      if(a.charging>0){a.charging-=dt;sp=animalSpeed(a)*2.7;}
+    }
+    let nx=a.x+Math.cos(a.ang)*sp*dt, ny=a.y+Math.sin(a.ang)*sp*dt;
+    nx=Math.max(T.r+2,Math.min(W-T.r-2,nx));
+    ny=Math.max(44+T.r,Math.min(408-T.r,ny));
+    const res=collide(nx,ny,T.r);
+    a.x=res[0];a.y=res[1];
+    if(res[2])a.ang=Math.atan2(Math.sin(a.ang),-Math.cos(a.ang));
+    if(res[3])a.ang=Math.atan2(-Math.sin(a.ang),Math.cos(a.ang));
+    if(res[2]||res[3])a.dirT=Math.min(a.dirT,0.4);
+    // 起きた動物に触れるとミス
+    if(Math.hypot(hunter.x-a.x,hunter.y-a.y)<T.r+12)hunterHit();
+    // クマが回収車に触れると1頭逃がす
+    if(a.type==='bear'&&a.releaseCd<=0&&capturedList.length>0&&Math.hypot(TRUCK.x-a.x,TRUCK.y-a.y)<46){
+      const t=capturedList.pop();caught=Math.max(0,caught-1);
+      spawnAnimal(t,TRUCK.x+56,TRUCK.y-34,6);
+      a.releaseCd=6;
+      floats.push({x:TRUCK.x,y:TRUCK.y-56,text:'クマが1頭逃がした！',t:1.4,bad:true});
+    }
+  }
+  // 担ぐ
+  if(!hunter.carry){
+    for(const a of animals){
+      if(a.state==='sleep'&&Math.hypot(hunter.x-a.x,hunter.y-a.y)<TYPES[a.type].r+15){
+        a.state='carried';hunter.carry=a;break;
+      }
+    }
+  }
+  // 運び込み
+  if(hunter.carry&&Math.hypot(hunter.x-TRUCK.x,hunter.y-TRUCK.y)<48)deliver();
+  // ダーツ×動物
+  for(const d of darts){
+    if(d.hit)continue;
+    for(const a of animals){
+      if(a.state!=='awake')continue;
+      const T=TYPES[a.type];
+      if(Math.hypot(d.x-a.x,d.y-a.y)<T.r+4){d.hit=true;hitAnimal(a);floats.push({x:a.x,y:a.y-T.r-6,text:'💤'+a.dose+'/'+T.need,t:0.7});break;}
+    }
+  }
+  darts=darts.filter(d=>!d.hit);
+  animals=animals.filter(a=>a.state!=='gone');
+  for(const f of floats)f.t-=dt;
+  floats=floats.filter(f=>f.t>0);
+  updateHud();
+}
+function drawBuilding(b){
+  // 歩道
+  ctx.fillStyle='#c2cf9e';ctx.fillRect(b.x-4,b.y-4,b.w+8,b.h+8);
+  if(b.kind==='house'){
+    ctx.fillStyle='#e8dcc0';ctx.fillRect(b.x,b.y+8,b.w,b.h-8);
+    ctx.fillStyle='#a1887f';
+    ctx.beginPath();ctx.moveTo(b.x-3,b.y+10);ctx.lineTo(b.x+b.w/2,b.y-6);ctx.lineTo(b.x+b.w+3,b.y+10);ctx.closePath();ctx.fill();
+    ctx.fillStyle='#7fb3d5';ctx.fillRect(b.x+b.w/2-6,b.y+18,12,10);
+  } else {
+    ctx.fillStyle='#b0bec5';ctx.fillRect(b.x,b.y,b.w,b.h);
+    ctx.fillStyle='#78909c';ctx.fillRect(b.x,b.y,b.w,8);
+    ctx.fillStyle='#d6eaf8';
+    for(let r=0;r<2;r++)for(let c=0;c<4;c++)ctx.fillRect(b.x+10+c*(b.w-16)/4,b.y+14+r*16,10,9);
+  }
+  ctx.font='9px sans-serif';ctx.fillStyle='#5d4a2a';ctx.textAlign='center';
+  ctx.fillText(b.kind==='house'?'民家':'アパート',b.x+b.w/2,b.y+b.h+12);
+}
+function drawAnimal(a){
+  const T=TYPES[a.type];
+  ctx.save();ctx.translate(a.x,a.y);
+  const flip=a.state==='awake'&&Math.cos(a.ang)<0;
+  if(flip)ctx.scale(-1,1);
+  ctx.font=(T.r*2)+'px serif';ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText(T.emoji,0,a.state==='awake'?Math.sin(a.phase)*1.6:0);
+  ctx.restore();
+  if(a.state==='sleep'||a.state==='carried'){
+    ctx.font='bold 14px sans-serif';ctx.fillStyle='#3355aa';ctx.textAlign='center';
+    ctx.fillText('💤',a.x+T.r,a.y-T.r-4+Math.sin(stageTime*3)*2);
+    ctx.fillStyle='rgba(0,0,0,.35)';ctx.fillRect(a.x-16,a.y-T.r-12,32,5);
+    ctx.fillStyle='#ffd54d';ctx.fillRect(a.x-16,a.y-T.r-12,32*Math.max(0,a.sleepT/T.sleep),5);
+  } else if(a.dose>0){
+    ctx.fillStyle='rgba(0,0,0,.35)';ctx.fillRect(a.x-16,a.y-T.r-12,32,5);
+    ctx.fillStyle='#8ecbff';ctx.fillRect(a.x-16,a.y-T.r-12,32*a.dose/T.need,5);
+  }
+  if(a.charging>0){ctx.font='14px sans-serif';ctx.textAlign='center';ctx.fillText('💨',a.x-Math.cos(a.ang)*(T.r+10),a.y);}
+}
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  // 里山（上の林）
+  ctx.fillStyle='#6b9a4f';ctx.fillRect(0,36,W,56);
+  ctx.font='24px serif';ctx.textAlign='center';
+  for(let i=0;i<12;i++)ctx.fillText('🌲',(i*53)%W+18,66);
+  ctx.font='bold 11px sans-serif';ctx.fillStyle='#2e4a22';ctx.fillText('里 山',40,48);
+  // 池
+  ctx.fillStyle='#7ec8e3';ctx.beginPath();ctx.ellipse(60,64,44,15,0,0,7);ctx.fill();
+  // 地面
+  ctx.fillStyle='#a8bf8f';ctx.fillRect(0,92,W,H-92);
+  // 建物
+  BUILDINGS.forEach(drawBuilding);
+  // 駐車場と回収車
+  ctx.fillStyle='#9e9e9e';ctx.fillRect(196,368,184,52);
+  ctx.strokeStyle='#f5f5f5';ctx.setLineDash([6,6]);ctx.strokeRect(202,374,172,40);ctx.setLineDash([]);
+  ctx.font='42px serif';ctx.textAlign='center';ctx.fillText('🚚',TRUCK.x,TRUCK.y);
+  ctx.font='bold 11px sans-serif';ctx.fillStyle='#4a3a10';ctx.fillText('回収車',TRUCK.x,TRUCK.y+27);
+  // 燃料ゲージ
+  ctx.fillStyle='rgba(0,0,0,.4)';ctx.fillRect(W-118,378,104,10);
+  ctx.fillStyle=fuel>30?'#8bc34a':'#ff5252';ctx.fillRect(W-116,380,100*Math.max(0,fuel)/100,6);
+  ctx.font='11px sans-serif';ctx.fillStyle='#333';ctx.textAlign='left';ctx.fillText('⛽燃料',W-118,374);ctx.textAlign='center';
+  // 動物
+  animals.filter(a=>a.state!=='carried').forEach(drawAnimal);
+  // ハンター
+  if(hunter&&state!=='gameover'){
+    if(hunter.carry)drawAnimal(hunter.carry);
+    if(!(hunter.inv>0&&Math.floor(stageTime*10)%2===0&&state==='play')){
+      ctx.save();ctx.translate(hunter.x,hunter.y);
+      ctx.strokeStyle='#37474f';ctx.lineWidth=5;ctx.beginPath();
+      ctx.moveTo(0,0);ctx.lineTo(hunter.fx*22,hunter.fy*22);ctx.stroke();ctx.lineWidth=1;
+      ctx.font='30px serif';ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillText('🧑',0,0);
+      ctx.restore();
+    }
+  }
+  // ダーツ
+  for(const d of darts){
+    ctx.save();ctx.translate(d.x,d.y);ctx.rotate(Math.atan2(d.vy,d.vx)+Math.PI/2);
+    ctx.fillStyle='#ff5252';ctx.fillRect(-2,-8,4,10);
+    ctx.fillStyle='#eceff1';ctx.fillRect(-1,-12,2,5);
+    ctx.restore();
+  }
+  // フロート文字
+  for(const f of floats){
+    ctx.font='bold 14px sans-serif';ctx.textAlign='center';
+    ctx.fillStyle=f.bad?'#ff5252':'#fff';ctx.fillText(f.text,f.x,f.y);
+  }
+  ctx.textAlign='center';
+  if(state==='title')overlay('里山ほかく隊','眠らせて、担いで、回収車へ運ぼう','スタートボタンを押してね');
+  else if(state==='ready')overlay('STAGE '+stage,'ノルマ '+quota+' 頭を捕獲しよう','起きた動物に触れるな！');
+  else if(state==='clear')overlay('STAGE CLEAR!','町は守られた','');
+  else if(state==='gameover')overlay('GAME OVER','SCORE '+score,'もう一度ボタンで再挑戦');
+  else if(state==='pause')overlay('一時停止中','Pキーで再開','');
+}
+function overlay(t,s1,s2){
+  ctx.fillStyle='rgba(10,25,8,.78)';ctx.fillRect(88,140,400,150);
+  ctx.strokeStyle='#ffd54d';ctx.strokeRect(88,140,400,150);
+  ctx.fillStyle='#ffd54d';ctx.font='bold 29px sans-serif';ctx.fillText(t,288,196);
+  ctx.fillStyle='#f2f7e8';ctx.font='16px sans-serif';ctx.fillText(s1,288,236);ctx.fillText(s2,288,262);
+}
+function loop(ts){
+  const dt=Math.min(0.05,(ts-lastTs)/1000||0);lastTs=ts;
+  if(state!=='pause')update(dt);
+  draw();requestAnimationFrame(loop);
+}
+window.addEventListener('keydown',e=>{
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code))e.preventDefault();
+  keys[e.code]=true;
+  if(e.code==='KeyP'){if(state==='play')state='pause';else if(state==='pause')state='play';}
+  if(e.code==='Enter'&&(state==='title'||state==='gameover'))resetGame();
+});
+window.addEventListener('keyup',e=>{keys[e.code]=false;});
+document.querySelectorAll('[data-k]').forEach(btn=>{
+  btn.addEventListener('pointerdown',e=>{e.preventDefault();keys[btn.dataset.k]=true;});
+  btn.addEventListener('pointerup',()=>keys[btn.dataset.k]=false);
+  btn.addEventListener('pointerleave',()=>keys[btn.dataset.k]=false);
+  btn.addEventListener('pointercancel',()=>keys[btn.dataset.k]=false);
+});
+$('bFire').addEventListener('pointerdown',e=>{e.preventDefault();keys.Space=true;});
+$('bFire').addEventListener('pointerup',()=>keys.Space=false);
+$('bFire').addEventListener('pointerleave',()=>keys.Space=false);
+$('start').addEventListener('click',resetGame);
+makeStage();draw();requestAnimationFrame(loop);
+</script>
+</body>
+</html>
