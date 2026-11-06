@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>くいだおれクライマー｜NAWOMIDOUゲーム館</title>
+<style>
+  body{margin:0;background:#10101c;color:#eee;font-family:sans-serif;text-align:center;-webkit-user-select:none;user-select:none}
+  h1{font-size:19px;margin:10px 0 2px}
+  .sub{font-size:12px;color:#9ab;margin:0 0 8px}
+  #wrap{position:relative;width:576px;max-width:100vw;margin:0 auto}
+  canvas{background:#87b5d9;display:block;margin:0 auto;max-width:100vw;height:auto;touch-action:none;border-radius:6px}
+  #hud{position:absolute;top:6px;left:0;right:0;display:flex;justify-content:space-between;padding:0 12px;font-weight:bold;font-size:15px;color:#fff;text-shadow:1px 1px 2px #000;pointer-events:none}
+  #msg{position:absolute;top:40%;left:0;right:0;font-size:26px;font-weight:bold;color:#fff;text-shadow:2px 2px 4px #000;pointer-events:none;padding:0 20px}
+  #pad{display:flex;justify-content:space-between;align-items:center;width:576px;max-width:100vw;margin:8px auto 4px;padding:0 10px;box-sizing:border-box}
+  #pad .grp{display:flex;gap:10px}
+  #pad button{width:62px;height:62px;font-size:26px;border-radius:50%;border:2px solid #567;background:#223;color:#fff;touch-action:none}
+  #pad button:active{background:#456}
+  .howto{font-size:13px;color:#aab;max-width:576px;margin:8px auto 20px;line-height:1.7;padding:0 12px;text-align:left}
+  kbd{background:#223;border:1px solid #567;border-radius:4px;padding:0 6px;color:#fff}
+</style>
+</head>
+<body>
+<h1>🧗 くいだおれクライマー</h1>
+<p class="sub">ビルを登って屋上へ！ ドローンと落下物をよけ、屋上の食い倒れ人形のたこ焼き攻撃をかわせ</p>
+<div id="wrap">
+  <canvas id="cv" width="576" height="432"></canvas>
+  <div id="hud"><span id="hScore">SCORE 0</span><span id="hStage">STAGE 1</span><span id="hDist">屋上まで 58m</span><span id="hLives">🧗×3</span></div>
+  <div id="msg"></div>
+</div>
+<div id="pad">
+  <div class="grp"><button id="bL">◀</button><button id="bR">▶</button></div>
+  <div class="grp"><button id="bD">▼</button><button id="bU">▲</button></div>
+</div>
+<div class="howto">
+遊び方：<kbd>↑</kbd><kbd>↓</kbd>で登る・下りる、<kbd>←</kbd><kbd>→</kbd>で窓の列を移ります（スマホはボタン）。<br>
+・上から植木鉢や看板が落ちてきます。当たると落下。<br>
+・窓が光ったら開く合図。その窓の前からは離れてください。<br>
+・ドローンが横切ります。接近の警告が出たら、登るか下りるかで高さをずらして回避。<br>
+・屋上が近づくと、食い倒れ人形が左右に動いてたこ焼きを投げてきます。よけながら屋上（ゴールライン）に届けばクリアです。<br>
+・落下しても、登った高さの少し下から再開できます（命3つ）。
+</div>
+<script>
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d');
+const W=576,H=432,SPEED=0.6;
+const LANES=[128,208,288,368,448];
+const ROOF_Y=110;
+let keys={},state='title',stage=1,score=0,lives=3,time=0;
+let HS=2400; // ビルの高さ(px)
+let player,doll,objects,windows,drones,takos,camY,highest,dropTimer,winTimer,droneTimer,invincible,messageT=0;
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const laneX=l=>LANES[l];
+
+function reset(full){
+  if(full){stage=1;score=0;lives=3;}
+  HS=2400+(stage-1)*400;
+  player={lane:2,x:laneX(2),y:HS-40,vy:0,armT:0};
+  doll={x:288,dir:1,active:false,throwT:1.2,armT:0};
+  objects=[];windows=[];drones=[];takos=[];
+  highest=player.y;camY=HS-H;
+  dropTimer=1.0;winTimer=2.0;droneTimer=5+Math.random()*3;invincible=0;
+  state='playing';showMsg('STAGE '+stage+' スタート！');
+}
+function respawn(){
+  player.lane=2;player.x=laneX(2);
+  player.y=Math.min(HS-40,highest+240);player.vy=0;
+  objects=objects.filter(o=>o.y<player.y-300||o.y>player.y+80);
+  windows=[];drones=[];takos=[];
+  invincible=1.6;state='playing';showMsg('再開！');
+}
+function showMsg(t){document.getElementById('msg').textContent=t;messageT=1.4;}
+function fall(){
+  if(invincible>0||state!=='playing')return;
+  state='falling';player.vy=0;
+}
+function hitCheck(){ // 落下後の処理
+  lives--;updateHUD();
+  if(lives<=0){state='over';showMsg('ゲームオーバー… Enterで再挑戦');}
+  else respawn();
+}
+function clearStage(){
+  score+=500+lives*100;state='clear';showMsg('屋上到達！ ステージクリア +'+(500+lives*100));
+  setTimeout(()=>{if(state==='clear'){stage++;reset(false);}},2200);
+}
+function updateHUD(){
+  document.getElementById('hScore').textContent='SCORE '+score;
+  document.getElementById('hStage').textContent='STAGE '+stage;
+  document.getElementById('hDist').textContent='屋上まで '+Math.max(0,Math.ceil((player.y-ROOF_Y)/38))+'m';
+  document.getElementById('hLives').textContent='🧗×'+lives;
+}
+
+function step(dt){
+  time+=dt;if(messageT>0){messageT-=dt;if(messageT<=0)document.getElementById('msg').textContent='';}
+  if(state==='title'||state==='over'){if(keys['Enter']){keys['Enter']=false;reset(true);}draw();return;}
+  if(state==='clear'){draw();return;}
+  if(invincible>0)invincible-=dt;
+
+  // --- ドローンのスポーン（先に計算して player 移動でも使う）---
+  if(state==='playing'){
+    // プレイヤー移動
+    if(keys['ArrowLeft']||keys['a']) {player.lane=Math.max(0,player.lane-1);keys['ArrowLeft']=keys['a']=false;}
+    if(keys['ArrowRight']||keys['d']){player.lane=Math.min(4,player.lane+1);keys['ArrowRight']=keys['d']=false;}
+    const targetX=laneX(player.lane);
+    player.x+=(targetX-player.x)*Math.min(1,dt*10);
+    let climb=0;
+    if(keys['ArrowUp']||keys['w'])climb=-1;
+    if(keys['ArrowDown']||keys['s'])climb=1;
+    const cs=(climb<0?150:95)*SPEED*1.02;
+    player.y+=climb*cs*dt;
+    player.y=clamp(player.y,60,HS-30);
+    if(climb<0){player.armT+=dt*7;score+=dt*6;}
+    else player.armT+=dt*1.5;
+    if(player.y<highest)highest=player.y;
+    if(player.y<=ROOF_Y){clearStage();draw();return;}
+
+    // 落下物
+    dropTimer-=dt;
+    if(dropTimer<=0){
+      dropTimer=Math.max(0.55,1.15-stage*0.08)+Math.random()*0.4;
+      if(Math.random()<0.22){
+        const c=1+Math.floor(Math.random()*3);
+        objects.push({kind:'sign',x:(laneX(c-1)+laneX(c))/2,y:camY-100,vy:(95+Math.random()*20)*SPEED*0.96});
+      }else{
+        objects.push({kind:'pot',lane:Math.floor(Math.random()*5),x:0,y:camY-100,vy:(115+Math.random()*35)*SPEED*0.96});
+        objects[objects.length-1].x=laneX(objects[objects.length-1].lane);
+      }
+    }
+    for(const o of objects)o.y+=o.vy*dt;
+    objects=objects.filter(o=>o.y<camY+H+80);
+    for(const o of objects){
+      const hw=o.kind==='sign'?70:24,hh=o.kind==='sign'?22:24;
+      if(Math.abs(o.x-player.x)<hw&&Math.abs(o.y-player.y)<hh){fall();break;}
+    }
+
+    // 窓イベント
+    winTimer-=dt;
+    if(winTimer<=0&&windows.length<2){
+      winTimer=2.0+Math.random()*1.2;
+      const lane=Math.floor(Math.random()*5);
+      const rowY=Math.round((player.y-230-Math.random()*160)/72)*72;
+      windows.push({lane,x:laneX(lane),y:rowY,state:'warn',t:0.7});
+    }
+    for(const wn of windows){
+      wn.t-=dt;
+      if(wn.state==='warn'&&wn.t<=0){wn.state='open';wn.t=1.4;}
+    }
+    windows=windows.filter(wn=>!(wn.state==='open'&&wn.t<=0)&&wn.y<camY+H+120&&wn.y>camY-200);
+    for(const wn of windows){
+      if(wn.state==='open'&&Math.abs(wn.x-player.x)<28&&Math.abs(wn.y-player.y)<30){fall();break;}
+    }
+
+    // ドローン
+    droneTimer-=dt;
+    if(droneTimer<=0){
+      droneTimer=6+Math.random()*3.5;
+      const side=Math.random()<0.5?-1:1;
+      drones.push({x:side<0?-50:W+50,y:player.y-60+Math.random()*130,side,state:'warn',t:0.9,vx:0});
+    }
+    for(const d of drones){
+      if(d.state==='warn'){d.t-=dt;if(d.t<=0){d.state='fly';d.vx=-d.side*160*SPEED*1.02;}}
+      else d.x+=d.vx*dt;
+    }
+    drones=drones.filter(d=>d.state==='warn'||(d.x>-90&&d.x<W+90));
+    for(const d of drones){
+      if(d.state==='fly'&&Math.abs(d.x-player.x)<36&&Math.abs(d.y-player.y)<26){fall();break;}
+    }
+
+    // 食い倒れ人形（屋上付近）
+    doll.active=player.y<460;
+    if(doll.active){
+      doll.armT+=dt*6;
+      doll.x+=doll.dir*70*SPEED*0.96*dt;
+      if(doll.x<150){doll.x=150;doll.dir=1;}
+      if(doll.x>426){doll.x=426;doll.dir=-1;}
+      doll.throwT-=dt;
+      if(doll.throwT<=0){
+        doll.throwT=Math.max(0.9,1.7-stage*0.1);
+        for(const vx of[-46,0,46])takos.push({x:doll.x,y:96,vx,vy:70});
+      }
+    }
+    for(const t of takos){t.vy+=300*dt;t.x+=t.vx*dt;t.y+=t.vy*dt;}
+    takos=takos.filter(t=>t.y<camY+H+80);
+    for(const t of takos){
+      if(Math.abs(t.x-player.x)<26&&Math.abs(t.y-player.y)<26){fall();break;}
+    }
+  }
+
+  if(state==='falling'){
+    player.vy+=900*dt;player.y+=player.vy*dt;
+    if(player.y>camY+H+70)hitCheck();
+  }
+  camY=clamp(player.y-250,0,HS-H);
+  score=Math.max(score,Math.floor((HS-highest)/12)+(stage-1)*200);
+  updateHUD();
+  draw();
+}
+
+function drawBuilding(){
+  // 空と隣のビル
+  ctx.fillStyle='#87b5d9';ctx.fillRect(0,0,W,H);
+  ctx.fillStyle='#6f9ec4';ctx.fillRect(0,0,70,H);ctx.fillRect(506,0,70,H);
+  // 本体
+  ctx.fillStyle='#cbb59a';ctx.fillRect(88,0,400,H);
+  ctx.fillStyle='#bfa888';ctx.fillRect(88,0,10,H);ctx.fillRect(478,0,10,H);
+  // 窓グリッド
+  const rowH=72;
+  const startRow=Math.floor(camY/rowH);
+  for(let r=startRow;r<startRow+8;r++){
+    const wy=r*rowH-camY+36;
+    if(wy<-40||wy>H+40)continue;
+    for(const lx of LANES){
+      const ev=windows.find(wn=>wn.lane===LANES.indexOf(lx)&&Math.abs(wn.y-r*rowH)<4);
+      if(ev){
+        if(ev.state==='warn'){
+          ctx.fillStyle=(Math.floor(time*8)%2===0)?'#ffd94a':'#fff3b0';
+          ctx.fillRect(lx-24,wy-24,48,48);
+        }else{
+          ctx.fillStyle='#fff';ctx.fillRect(lx-24,wy-24,48,48);
+          ctx.fillStyle='#3a3a3a';ctx.fillRect(lx-24,wy-24,48,10);
+          ctx.font='20px sans-serif';ctx.textAlign='center';ctx.fillText('😲',lx,wy+18);
+        }
+      }else{
+        ctx.fillStyle='#5d7d99';ctx.fillRect(lx-24,wy-24,48,48);
+        ctx.fillStyle='#7fa3bd';ctx.fillRect(lx-20,wy-20,18,40);
+      }
+      ctx.strokeStyle='#8a7358';ctx.strokeRect(lx-24,wy-24,48,48);
+    }
+  }
+  // 屋上
+  const roofScreenY=0-camY;
+  if(roofScreenY>-90){
+    ctx.fillStyle='#7a5c40';ctx.fillRect(80,roofScreenY-46,416,46);
+    ctx.fillStyle='#5d4630';ctx.fillRect(80,roofScreenY-52,416,8);
+    ctx.fillStyle='#e33';ctx.fillRect(80,ROOF_Y-camY-3,416,5);
+    ctx.fillStyle='#fff';ctx.font='bold 13px sans-serif';ctx.textAlign='left';
+    ctx.fillText('GOAL',92,ROOF_Y-camY-8);
+  }
+  // 地面
+  const gY=HS-camY;
+  if(gY<H+40){ctx.fillStyle='#5d8a4a';ctx.fillRect(0,gY,W,H-gY);ctx.fillStyle='#777';ctx.fillRect(0,gY,W,8);}
+}
+
+function drawDoll(sy){
+  const x=doll.x,y=sy;
+  // 太鼓
+  ctx.fillStyle='#a33327';ctx.beginPath();ctx.ellipse(x,y+26,26,12,0,0,7);ctx.fill();
+  ctx.fillStyle='#e8d9b0';ctx.beginPath();ctx.ellipse(x,y+16,26,10,0,0,7);ctx.fill();
+  // 体（紺の法被・オリジナルデザイン）
+  ctx.fillStyle='#27437c';ctx.fillRect(x-20,y-8,40,28);
+  ctx.fillStyle='#fff';ctx.fillRect(x-3,y-8,6,28);
+  // 頭
+  ctx.fillStyle='#f2c894';ctx.beginPath();ctx.arc(x,y-22,15,0,7);ctx.fill();
+  ctx.fillStyle='#27437c';ctx.fillRect(x-16,y-36,32,7);
+  // 顔（笑顔）
+  ctx.strokeStyle='#333';ctx.lineWidth=2;
+  ctx.beginPath();ctx.arc(x-5,y-23,3,3.4,6.0);ctx.stroke();
+  ctx.beginPath();ctx.arc(x+5,y-23,3,3.4,6.0);ctx.stroke();
+  ctx.beginPath();ctx.arc(x,y-16,5,0.3,2.8);ctx.stroke();
+  // バチを持つ腕（交互に振る）
+  const up=Math.sin(doll.armT)>0;
+  ctx.strokeStyle='#f2c894';ctx.lineWidth=5;
+  ctx.beginPath();ctx.moveTo(x-18,y-2);ctx.lineTo(x-30,up?y-16:y+8);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(x+18,y-2);ctx.lineTo(x+30,up?y+8:y-16);ctx.stroke();
+  ctx.strokeStyle='#8a5a2a';ctx.lineWidth=3;
+  ctx.beginPath();ctx.moveTo(x-30,up?y-16:y+8);ctx.lineTo(x-36,up?y-24:y+2);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(x+30,up?y+8:y-16);ctx.lineTo(x+36,up?y+2:y-24);ctx.stroke();
+}
+
+function draw(){
+  drawBuilding();
+  // 落下物
+  for(const o of objects){
+    const sy=o.y-camY;
+    if(o.kind==='pot'){ctx.font='30px sans-serif';ctx.textAlign='center';ctx.fillText('🪴',o.x,sy+10);}
+    else{
+      ctx.fillStyle='#8a4a2a';ctx.fillRect(o.x-64,sy-14,128,28);
+      ctx.fillStyle='#ffe9a8';ctx.font='bold 15px sans-serif';ctx.textAlign='center';ctx.fillText('たこ焼き',o.x,sy+5);
+    }
+  }
+  // たこ焼き
+  for(const t of takos){
+    const sy=t.y-camY;
+    ctx.fillStyle='#b06a28';ctx.beginPath();ctx.arc(t.x,sy,9,0,7);ctx.fill();
+    ctx.fillStyle='#5d8a3a';ctx.fillRect(t.x-5,sy-4,10,3);
+  }
+  // ドローン
+  for(const d of drones){
+    const sy=d.y-camY;
+    if(d.state==='warn'){
+      ctx.fillStyle='#e33';ctx.font='bold 22px sans-serif';ctx.textAlign=d.side<0?'left':'right';
+      ctx.fillText('⚠',d.side<0?6:W-6,clamp(sy,24,H-10));
+      ctx.font='bold 12px sans-serif';ctx.fillText('ドローン接近',d.side<0?6:W-6,clamp(sy,24,H-10)+16);
+    }else{
+      ctx.fillStyle='#444';ctx.fillRect(d.x-16,sy-6,32,12);
+      ctx.fillStyle='#666';
+      ctx.beginPath();ctx.arc(d.x-20,sy-9,7,0,7);ctx.fill();ctx.beginPath();ctx.arc(d.x+20,sy-9,7,0,7);ctx.fill();
+      ctx.beginPath();ctx.arc(d.x-20,sy+9,7,0,7);ctx.fill();ctx.beginPath();ctx.arc(d.x+20,sy+9,7,0,7);ctx.fill();
+      ctx.fillStyle='#e33';ctx.beginPath();ctx.arc(d.x,sy,3,0,7);ctx.fill();
+    }
+  }
+  // 人形（屋上）
+  if(doll.active||camY<200)drawDoll(64-camY);
+  // プレイヤー
+  const psy=player.y-camY;
+  if(!(invincible>0&&Math.floor(time*10)%2===0)){
+    ctx.font='34px sans-serif';ctx.textAlign='center';
+    ctx.fillText('🧗',player.x,psy+12);
+    if(state==='playing'){
+      const up=Math.sin(player.armT)>0;
+      ctx.font='15px sans-serif';
+      ctx.fillText(up?'🖐':'　',player.x-20,psy-14);
+      ctx.fillText(up?'　':'🖐',player.x+20,psy-14);
+    }
+    if(state==='falling'){ctx.font='16px sans-serif';ctx.fillText('😱',player.x,psy-22);}
+  }
+  // 進捗バー
+  ctx.fillStyle='rgba(0,0,0,0.35)';ctx.fillRect(W-16,60,8,H-140);
+  ctx.fillStyle='#ffd94a';const ph=(H-140)*clamp((HS-player.y)/(HS-ROOF_Y),0,1);
+  ctx.fillRect(W-16,60+(H-140)-ph,8,ph);
+  if(state==='title'){
+    ctx.fillStyle='rgba(0,0,0,0.55)';ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#fff';ctx.font='bold 30px sans-serif';ctx.textAlign='center';
+    ctx.fillText('くいだおれクライマー',W/2,150);
+    ctx.font='17px sans-serif';
+    ctx.fillText('ビルを登って屋上ゴールを目指せ！',W/2,196);
+    ctx.fillText('ドローンと落下物をよけて登れ',W/2,224);
+    ctx.fillText('屋上では食い倒れ人形がたこ焼きで迎撃',W/2,252);
+    ctx.font='bold 19px sans-serif';ctx.fillText('Enterキー / タップでスタート',W/2,306);
+  }
+  if(state==='over'){
+    ctx.fillStyle='rgba(0,0,0,0.55)';ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#fff';ctx.font='bold 30px sans-serif';ctx.textAlign='center';
+    ctx.fillText('ゲームオーバー',W/2,190);
+    ctx.font='19px sans-serif';ctx.fillText('SCORE '+score,W/2,232);
+    ctx.fillText('Enterキー / タップで再挑戦',W/2,272);
+  }
+}
+
+addEventListener('keydown',e=>{
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key))e.preventDefault();
+  keys[e.key]=true;
+  if(state==='title'&&(e.key==='Enter'||e.key===' '))reset(true);
+});
+addEventListener('keyup',e=>{keys[e.key]=false;});
+function bindBtn(id,key){
+  const el=document.getElementById(id);
+  const on=e=>{e.preventDefault();keys[key]=true;if(state==='title'||state==='over')reset(true);};
+  const off=e=>{e.preventDefault();keys[key]=false;};
+  el.addEventListener('touchstart',on,{passive:false});el.addEventListener('touchend',off,{passive:false});
+  el.addEventListener('mousedown',on);el.addEventListener('mouseup',off);el.addEventListener('mouseleave',off);
+}
+bindBtn('bL','ArrowLeft');bindBtn('bR','ArrowRight');bindBtn('bU','ArrowUp');bindBtn('bD','ArrowDown');
+cv.addEventListener('touchstart',e=>{e.preventDefault();if(state==='title'||state==='over')reset(true);},{passive:false});
+cv.addEventListener('mousedown',()=>{if(state==='title'||state==='over')reset(true);});
+
+player={lane:2,x:laneX(2),y:2360,vy:0,armT:0};
+doll={x:288,dir:1,active:false,throwT:1.2,armT:0};
+objects=[];windows=[];drones=[];takos=[];highest=2360;camY=HS-H;invincible=0;
+updateHUD();draw();
+let last=0;
+function loop(ts){const dt=Math.min(0.05,(ts-last)/1000||0.016);last=ts;step(dt);requestAnimationFrame(loop);}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
