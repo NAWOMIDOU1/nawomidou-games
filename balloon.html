@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>バルーンストーム｜NAWOMIDOUゲーム館</title>
+<style>
+  body { margin:0; background:#14202b; color:#eaf6ff; font-family:sans-serif; text-align:center; }
+  h1 { font-size:20px; margin:10px 0 2px; }
+  p.info { margin:2px 0 8px; font-size:13px; color:#bcd9ea; }
+  canvas { background:#79b5d9; border:2px solid #eaf6ff; border-radius:6px; max-width:96vw; }
+</style>
+</head>
+<body>
+<h1>🎈 バルーンストーム</h1>
+<p class="info">←→：高射砲を移動／スペース or クリック：発射。狙うのは風船ではなく「爆弾」の部分。風船を割ると爆弾が落ちて、地面に穴が開き、砲が通れなくなります。</p>
+<canvas id="cv" width="900" height="600"></canvas>
+<script>
+"use strict";
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const W = 900, H = 600, GROUND_Y = 540;
+
+// ===== 音 =====
+let AC = null;
+function beep(f, d, type, v) {
+  try {
+    if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.type = type || "square"; o.frequency.value = f;
+    g.gain.value = v || 0.05;
+    o.connect(g); g.connect(AC.destination);
+    o.start(); g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime + (d || 0.12));
+    o.stop(AC.currentTime + (d || 0.12));
+  } catch (e) {}
+}
+
+// ===== 状態 =====
+// 速度は酒本さんの基準で全体に0.6倍のゆるやかさ
+let gun, bullets, units, fallingBombs, craters, particles, plane;
+let worker = null, workerSpawnAt = -1;
+let score, hiScore = 0, lives, wave, gameState, timeSec;
+let shotsFired, consecHits, extraAt;
+let wind, eventNow, nextEventAt, eventEndsAt, lightning;
+let lastAutoDropAt = -99;
+const EVENTS = [
+  { id: "gust",    name: "突風",         icon: "💨" },
+  { id: "rain",    name: "豪雨",         icon: "🌧️" },
+  { id: "storm",   name: "落雷",         icon: "⛈️" },
+  { id: "thermal", name: "上昇気流",     icon: "🌡️" },
+];
+let nextEvent = EVENTS[0];
+
+function currentWind() {
+  let w = wind;
+  if (eventNow && eventNow.id === "gust") w += eventNow.gustDir * 78;
+  return w;
+}
+
+function makeWave() {
+  units = [];
+  const dir = wave % 2 === 1 ? 1 : -1;
+  const rowY = 96 + (wave - 1) * 34;
+  const speed = 25 + wave * 3;
+  for (let i = 0; i < 6; i++) {
+    units.push({
+      x: dir > 0 ? -80 - i * 128 : W + 80 + i * 128,
+      baseY: rowY, phase: i * 1.1, hasBomb: true, alive: true,
+      dropCool: 14 + i * 6 + Math.random() * 10,
+    });
+  }
+  fallingBombs = []; bullets = [];
+  plane = null;
+  if (wave >= 3 && wave % 2 === 1) {
+    plane = { x: -70, y: 58, vx: 92, dropped: 0, nextDrop: 1.2 };
+  }
+}
+
+function resetGame() {
+  score = 0; lives = 3; wave = 1; timeSec = 0;
+  shotsFired = 0; consecHits = 0; extraAt = 1500;
+  gun = { x: W / 2, inv: 0 };
+  craters = []; particles = [];
+  worker = null; workerSpawnAt = -1;
+  wind = 14;
+  lastAutoDropAt = -99;
+  eventNow = null; lightning = null;
+  nextEvent = EVENTS[0]; nextEventAt = 11;
+  gameState = "play";
+  makeWave();
+}
+
+// ===== 異常気象 =====
+function startEvent() {
+  eventNow = nextEvent;
+  eventEndsAt = timeSec + 5;
+  if (eventNow.id === "gust") eventNow.gustDir = Math.random() < 0.5 ? -1 : 1;
+  if (eventNow.id === "storm") lightning = { nextAt: timeSec + 0.5, warnX: -1, warnUntil: 0, boltUntil: 0, boltX: -1 };
+  beep(180, 0.3, "sawtooth", 0.06);
+}
+function endEvent() {
+  eventNow = null; lightning = null;
+  wind = (Math.random() * 36 - 18) + 8; // 通常の風も少しずつ変わる
+  nextEvent = EVENTS[Math.floor(Math.random() * EVENTS.length)];
+  nextEventAt = timeSec + 13 + Math.random() * 6;
+}
+
+// ===== 入力 =====
+const keys = {};
+addEventListener("keydown", (e) => {
+  keys[e.code] = true;
+  if (e.code === "Space") { fire(); e.preventDefault(); }
+  if (e.code === "KeyR" && gameState !== "play") resetGame();
+});
+addEventListener("keyup", (e) => { keys[e.code] = false; });
+cv.addEventListener("pointerdown", () => {
+  if (gameState !== "play") { resetGame(); return; }
+  fire();
+});
+
+function fire() {
+  if (gameState !== "play" || bullets.length >= 2) return;
+  bullets.push({ x: gun.x, y: GROUND_Y - 26, vy: -345 });
+  shotsFired++;
+  beep(740, 0.06, "square", 0.04);
+}
+
+// ===== スコア =====
+function addScore(n) {
+  score += n;
+  if (score >= extraAt) { lives++; extraAt += 3000; beep(990, 0.2, "square", 0.06); }
+  if (score > hiScore) hiScore = score;
+}
+function registerHit() {
+  consecHits++;
+  if (consecHits % 3 === 0) { addScore(100); spawnText(gun.x, GROUND_Y - 90, "3連続命中ボーナス +100", "#ffd94d"); }
+}
+function spawnText(x, y, text, color) {
+  particles.push({ x: x, y: y, vx: 0, vy: -26, life: 1.1, color: color, text: text });
+}
+function burst(x, y, color, n) {
+  for (let i = 0; i < (n || 10); i++) {
+    particles.push({ x: x, y: y, vx: (Math.random() - 0.5) * 160, vy: (Math.random() - 0.5) * 160, life: 0.5, color: color });
+  }
+}
+
+// ===== 命中処理 =====
+function balloonPos(u) {
+  const bobAmp = (eventNow && eventNow.id === "thermal") ? 15 : 7;
+  return { x: u.x + Math.sin(timeSec * 1.3 + u.phase) * 9, y: u.baseY + Math.sin(timeSec * 1.7 + u.phase) * bobAmp };
+}
+function shootDownUnit(u, byBomb) {
+  const p = balloonPos(u);
+  u.alive = false;
+  burst(p.x, p.y, "#ff8fa3", 12);
+  if (byBomb) {
+    addScore(100); registerHit();
+    burst(p.x, p.y + 26, "#ffb347", 8);
+    beep(160, 0.18, "sawtooth", 0.06);
+  } else {
+    addScore(50); registerHit();
+    beep(880, 0.07, "square", 0.05);
+    if (u.hasBomb) {
+      fallingBombs.push({ x: p.x, y: p.y + 26, fromPlane: false });
+    }
+  }
+}
+function detachBomb(u) {
+  const p = balloonPos(u);
+  u.hasBomb = false;
+  fallingBombs.push({ x: p.x, y: p.y + 26, fromPlane: false });
+}
+
+function hitGun() {
+  if (gun.inv > 0) return;
+  lives--;
+  burst(gun.x, GROUND_Y - 14, "#ff7847", 16);
+  beep(110, 0.3, "sawtooth", 0.07);
+  craters = []; // ミスで地面は修復される（往年のルール）
+  if (lives <= 0) { gameState = "over"; return; }
+  gun.inv = 2;
+}
+
+// ===== 更新 =====
+function update(dt) {
+  if (gameState !== "play") { updateParticles(dt); return; }
+  timeSec += dt;
+
+  // イベント
+  if (!eventNow && timeSec >= nextEventAt) startEvent();
+  if (eventNow && timeSec >= eventEndsAt) endEvent();
+  if (lightning) {
+    if (timeSec >= lightning.nextAt && lightning.warnX < 0) {
+      lightning.warnX = 60 + Math.random() * (W - 120);
+      lightning.warnUntil = timeSec + 0.55;
+    }
+    if (lightning.warnX >= 0 && timeSec >= lightning.warnUntil) {
+      lightning.boltX = lightning.warnX; lightning.boltUntil = timeSec + 0.16; lightning.warnX = -1;
+      lightning.nextAt = timeSec + 0.9 + Math.random() * 0.6;
+      beep(1250, 0.08, "sawtooth", 0.05);
+      // 落雷が風船に当たると割れて爆弾が落ちる
+      for (const u of units) {
+        if (!u.alive) continue;
+        const p = balloonPos(u);
+        if (Math.abs(p.x - lightning.boltX) < 20) { shootDownUnit(u, false); break; }
+      }
+    }
+  }
+
+  // 高射砲（穴は越えられない）
+  const spd = 178;
+  let nx = gun.x;
+  if (keys["ArrowLeft"]) nx -= spd * dt;
+  if (keys["ArrowRight"]) nx += spd * dt;
+  nx = Math.max(24, Math.min(W - 24, nx));
+  let blocked = false;
+  for (const c of craters) {
+    if (nx + 17 > c.x - c.w / 2 && nx - 17 < c.x + c.w / 2) { blocked = true; break; }
+  }
+  if (!blocked) gun.x = nx;
+  if (gun.inv > 0) gun.inv -= dt;
+
+  // 風船爆弾の隊列
+  const dir = wave % 2 === 1 ? 1 : -1;
+  const speed = 25 + wave * 3 + Math.abs(currentWind()) * 0.35;
+  let allGone = true;
+  for (const u of units) {
+    if (!u.alive) continue;
+    allGone = false;
+    u.x += dir * speed * dt + currentWind() * 0.3 * dt;
+    // 自動投下（まれに。全体でも間隔を空ける）
+    if (u.hasBomb) {
+      u.dropCool -= dt;
+      const p = balloonPos(u);
+      if (u.dropCool <= 0 && p.x > 30 && p.x < W - 30 && timeSec - lastAutoDropAt > 8) {
+        detachBomb(u);
+        lastAutoDropAt = timeSec;
+        u.dropCool = 26 + Math.random() * 14;
+      }
+    }
+  }
+  // 画面外に出た風船は反対側から戻る（全滅させるまで wave は終わらない）
+  for (const u of units) {
+    if (!u.alive) continue;
+    if (dir > 0 && u.x > W + 90) u.x = -90;
+    if (dir < 0 && u.x < -90) u.x = W + 90;
+  }
+  if (allGone) {
+    wave++;
+    addScore(300);
+    makeWave();
+  }
+
+  // 複葉機（3ウェーブ目以降、奇数ウェーブ）
+  if (plane) {
+    plane.x += plane.vx * dt;
+    plane.nextDrop -= dt;
+    if (plane.nextDrop <= 0 && plane.dropped < 3) {
+      fallingBombs.push({ x: plane.x, y: plane.y + 14, fromPlane: true });
+      plane.dropped++; plane.nextDrop = 0.9;
+    }
+    if (plane.x > W + 80) plane = null;
+  }
+
+  // 弾
+  for (const b of bullets) {
+    b.y += b.vy * dt;
+    if (b.y < -12) { b.dead = true; consecHits = 0; continue; }
+    // 風船・爆弾との判定
+    for (const u of units) {
+      if (!u.alive || b.dead) continue;
+      const p = balloonPos(u);
+      if (u.hasBomb && Math.abs(b.x - p.x) < 9 && Math.abs(b.y - (p.y + 27)) < 12) {
+        b.dead = true; shootDownUnit(u, true); // 爆弾に命中：100点
+      } else if (Math.abs(b.x - p.x) < 17 && Math.abs(b.y - p.y) < 18) {
+        b.dead = true; shootDownUnit(u, false); // 風船に命中：50点＋爆弾落下
+      }
+    }
+    // 落下中の爆弾との判定：150点（飛行機の爆弾は50点）
+    for (const f of fallingBombs) {
+      if (b.dead || f.dead) continue;
+      if (Math.abs(b.x - f.x) < 10 && Math.abs(b.y - f.y) < 12) {
+        b.dead = true; f.dead = true;
+        addScore(f.fromPlane ? 50 : 150); registerHit();
+        burst(f.x, f.y, "#ffb347", 10);
+        beep(200, 0.15, "sawtooth", 0.05);
+      }
+    }
+    // 複葉機との判定
+    if (!b.dead && plane && Math.abs(b.x - plane.x) < 26 && Math.abs(b.y - plane.y) < 12) {
+      b.dead = true; addScore(200); registerHit();
+      burst(plane.x, plane.y, "#ffd27f", 14);
+      plane = null;
+      beep(150, 0.25, "sawtooth", 0.06);
+    }
+  }
+  bullets = bullets.filter((b) => !b.dead);
+
+  // 落下する爆弾（風に流される）
+  const fallSpeed = (118 + wave * 5) * ((eventNow && eventNow.id === "rain") ? 1.5 : 1);
+  for (const f of fallingBombs) {
+    f.y += fallSpeed * dt;
+    f.x += currentWind() * 0.55 * dt;
+    if (eventNow && eventNow.id === "rain") f.x += Math.sin(timeSec * 8 + f.y * 0.06) * 12 * dt;
+    // 砲への直撃
+    if (Math.abs(f.x - gun.x) < 19 && f.y > GROUND_Y - 30 && f.y < GROUND_Y + 4) {
+      f.dead = true; hitGun(); continue;
+    }
+    if (f.y >= GROUND_Y - 3) {
+      f.dead = true;
+      craters.push({ x: Math.max(26, Math.min(W - 26, f.x)), w: 48, fullW: 48 });
+      burst(f.x, GROUND_Y - 4, "#8a6d3b", 10);
+      beep(95, 0.2, "sawtooth", 0.06);
+    }
+  }
+  fallingBombs = fallingBombs.filter((f) => !f.dead);
+
+  // 人夫が来て、荒れた地面をゆっくり修復する
+  if (craters.length === 0 && worker) worker.leaving = true;
+  if (craters.length > 0 && !worker && workerSpawnAt < 0) workerSpawnAt = timeSec + 2.5;
+  if (!worker && workerSpawnAt > 0 && timeSec >= workerSpawnAt && craters.length > 0) {
+    let target = craters[0];
+    worker = { x: target.x > W / 2 ? W + 20 : -20, state: "walk", target: target, repairP: 0, leaving: false };
+    workerSpawnAt = -1;
+  }
+  if (worker) {
+    const wspd = 74;
+    if (worker.leaving || craters.length === 0) {
+      worker.x += (worker.x < W / 2 ? -wspd : wspd) * dt;
+      if (worker.x < -30 || worker.x > W + 30) worker = null;
+    } else {
+      if (!craters.includes(worker.target)) {
+        let best = craters[0], bd = 1e9;
+        for (const c of craters) { const d = Math.abs(c.x - worker.x); if (d < bd) { bd = d; best = c; } }
+        worker.target = best; worker.state = "walk"; worker.repairP = 0;
+      }
+      const c = worker.target;
+      if (worker.state === "walk") {
+        const dx = c.x - worker.x;
+        if (Math.abs(dx) < 8) worker.state = "repair";
+        else worker.x += Math.sign(dx) * Math.min(Math.abs(dx), wspd * dt);
+      } else {
+        worker.repairP += dt / 5; // 1つの穴を埋めるのに約5秒
+        c.w = Math.max(0, c.fullW * (1 - worker.repairP));
+        if (Math.random() < dt * 6) {
+          particles.push({ x: c.x + (Math.random() - 0.5) * 16, y: GROUND_Y - 2, vx: (Math.random() - 0.5) * 40, vy: -30 - Math.random() * 30, life: 0.4, color: "#8a6d3b" });
+        }
+        if (worker.repairP >= 1) {
+          craters.splice(craters.indexOf(c), 1);
+          worker.state = "walk"; worker.repairP = 0;
+          if (craters.length === 0) worker.leaving = true;
+        }
+      }
+    }
+  }
+  updateParticles(dt);
+}
+
+function updateParticles(dt) {
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; if (!p.text) p.vy += 120 * dt; p.life -= dt; }
+  particles = particles.filter((p) => p.life > 0);
+}
+
+// ===== 描画 =====
+function draw() {
+  // 空
+  let sky = ctx.createLinearGradient(0, 0, 0, H);
+  if (eventNow && (eventNow.id === "rain" || eventNow.id === "storm")) { sky.addColorStop(0, "#3d5a73"); sky.addColorStop(1, "#7d99ad"); }
+  else { sky.addColorStop(0, "#5ea9dd"); sky.addColorStop(1, "#bfe6f7"); }
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+
+  // 雲（風で流れる）
+  ctx.fillStyle = "rgba(255,255,255,0.85)";
+  for (let i = 0; i < 6; i++) {
+    const cx = ((i * 211 + timeSec * (18 + currentWind())) % (W + 180) + (W + 180)) % (W + 180) - 90;
+    const cy = 30 + (i % 3) * 26;
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, 27, 9, 0, 0, Math.PI * 2);
+    ctx.ellipse(cx + 19, cy + 2, 18, 7, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // 地面
+  ctx.fillStyle = "#79a85b"; ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+  ctx.fillStyle = "#679350"; ctx.fillRect(0, GROUND_Y, W, 6);
+  // レール
+  ctx.fillStyle = "#5d4a33"; ctx.fillRect(0, GROUND_Y + 26, W, 4);
+  // クレーター（穴）
+  for (const c of craters) {
+    ctx.fillStyle = "#4c3a26";
+    ctx.beginPath(); ctx.ellipse(c.x, GROUND_Y + 3, c.w / 2, 9, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#332716";
+    ctx.beginPath(); ctx.ellipse(c.x, GROUND_Y + 4, c.w / 3, 6, 0, 0, Math.PI * 2); ctx.fill();
+  }
+
+  // 人夫（地面の修復係）
+  if (worker) {
+    ctx.save(); ctx.translate(worker.x, GROUND_Y);
+    const walking = worker.state === "walk" && !worker.leaving || worker.leaving;
+    const step = walking ? Math.sin(timeSec * 10) * 3 : 0;
+    ctx.strokeStyle = "#33415e"; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, -8); ctx.lineTo(-3 + step, 0);
+    ctx.moveTo(0, -8); ctx.lineTo(3 - step, 0);
+    ctx.stroke();
+    ctx.fillStyle = "#e08a2e"; ctx.fillRect(-4, -17, 8, 10); // 作業服
+    ctx.fillStyle = "#f2c894"; ctx.beginPath(); ctx.arc(0, -21, 4, 0, Math.PI * 2); ctx.fill(); // 顔
+    ctx.fillStyle = "#f7d117"; ctx.fillRect(-5, -26, 10, 3); // ヘルメット
+    ctx.strokeStyle = "#7a4a21"; ctx.lineWidth = 2;
+    if (worker.state === "repair" && !worker.leaving) {
+      const dig = Math.sin(timeSec * 7) * 4;
+      ctx.beginPath(); ctx.moveTo(3, -14); ctx.lineTo(9, -6 + dig); ctx.stroke();
+      ctx.fillStyle = "#9aa5ad"; ctx.fillRect(8, -7 + dig, 4, 5);
+    } else {
+      ctx.beginPath(); ctx.moveTo(3, -14); ctx.lineTo(10, -21); ctx.stroke();
+      ctx.fillStyle = "#9aa5ad"; ctx.fillRect(9, -25, 4, 5);
+    }
+    ctx.restore();
+  }
+
+  // 風船爆弾
+  for (const u of units) {
+    if (!u.alive) continue;
+    const p = balloonPos(u);
+    // 風船
+    const grad = ctx.createLinearGradient(p.x, p.y - 18, p.x, p.y + 16);
+    grad.addColorStop(0, "#ff7d9c"); grad.addColorStop(1, "#e33e63");
+    ctx.fillStyle = grad;
+    ctx.beginPath(); ctx.ellipse(p.x, p.y, 16, 18, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.beginPath(); ctx.ellipse(p.x - 5, p.y - 6, 5, 7, -0.4, 0, Math.PI * 2); ctx.fill();
+    if (u.hasBomb) {
+      ctx.strokeStyle = "#444"; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(p.x, p.y + 17); ctx.lineTo(p.x, p.y + 21); ctx.stroke();
+      // 爆弾（狙う部分）
+      ctx.fillStyle = "#2b2b33";
+      ctx.beginPath(); ctx.ellipse(p.x, p.y + 28, 7, 10, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = "#ffd94d"; ctx.fillRect(p.x - 1.5, p.y + 16, 3, 4);
+    }
+  }
+
+  // 複葉機
+  if (plane) {
+    ctx.save(); ctx.translate(plane.x, plane.y);
+    ctx.fillStyle = "#c8552e";
+    ctx.fillRect(-24, -3, 48, 7);
+    ctx.fillRect(-16, -12, 34, 5); ctx.fillRect(-16, 6, 34, 5);
+    ctx.fillRect(18, -9, 6, 12);
+    ctx.fillStyle = "#333"; ctx.beginPath(); ctx.arc(-26, 0, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  // 落下中の爆弾
+  for (const f of fallingBombs) {
+    ctx.fillStyle = "#2b2b33";
+    ctx.beginPath(); ctx.ellipse(f.x, f.y, 7, 10, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#ff7847"; ctx.fillRect(f.x - 1.5, f.y - 14, 3, 4);
+  }
+
+  // 弾
+  ctx.fillStyle = "#fff6c9";
+  for (const b of bullets) ctx.fillRect(b.x - 2, b.y - 7, 4, 12);
+
+  // 高射砲（列車砲）
+  ctx.save(); ctx.translate(gun.x, GROUND_Y);
+  if (gun.inv > 0 && Math.floor(timeSec * 10) % 2 === 0) ctx.globalAlpha = 0.35;
+  ctx.fillStyle = "#37474f";
+  ctx.fillRect(-19, -14, 38, 12); // 車体
+  ctx.fillStyle = "#222";
+  ctx.beginPath(); ctx.arc(-11, 0, 5, 0, Math.PI * 2); ctx.arc(11, 0, 5, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "#263238"; ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(0, -14); ctx.lineTo(0, -32); ctx.stroke(); // 砲身
+  ctx.fillStyle = "#546e7a"; ctx.fillRect(-7, -20, 14, 7); // 砲塔
+  ctx.restore();
+
+  // 落雷
+  if (lightning) {
+    if (lightning.warnX >= 0) {
+      ctx.fillStyle = "rgba(255,255,120,0.22)";
+      ctx.fillRect(lightning.warnX - 12, 0, 24, GROUND_Y);
+    }
+    if (timeSec < lightning.boltUntil) {
+      ctx.strokeStyle = "#fff475"; ctx.lineWidth = 3;
+      ctx.beginPath();
+      let bx = lightning.boltX; ctx.moveTo(bx, 0);
+      for (let y = 42; y < GROUND_Y; y += 42) { bx += (Math.random() - 0.5) * 22; ctx.lineTo(bx, y); }
+      ctx.stroke();
+    }
+  }
+  // 豪雨
+  if (eventNow && eventNow.id === "rain") {
+    ctx.strokeStyle = "rgba(200,230,255,0.5)"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i < 42; i++) {
+      const rx = (i * 97 + timeSec * 300) % W, ry = (i * 61 + timeSec * 540) % GROUND_Y;
+      ctx.moveTo(rx, ry); ctx.lineTo(rx - 3, ry + 12);
+    }
+    ctx.stroke();
+  }
+
+  // パーティクル
+  for (const p of particles) {
+    if (p.text) { ctx.fillStyle = p.color; ctx.font = "bold 14px sans-serif"; ctx.textAlign = "center"; ctx.fillText(p.text, p.x, p.y); }
+    else { ctx.fillStyle = p.color; ctx.fillRect(p.x - 2, p.y - 2, 4, 4); }
+  }
+
+  // ===== HUD =====
+  ctx.fillStyle = "rgba(10,30,45,0.78)"; ctx.fillRect(0, 0, W, 34);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 16px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("SCORE " + score, 12, 23);
+  ctx.fillText("HI " + hiScore, 185, 23);
+  ctx.fillText("WAVE " + wave, 300, 23);
+  ctx.fillText("残り砲 " + Math.max(0, lives), 395, 23);
+
+  // 天気予報カード
+  ctx.fillStyle = "rgba(255,255,255,0.92)";
+  const cardX = W - 252, cardY = 42;
+  ctx.beginPath(); ctx.roundRect(cardX, cardY, 240, 50, 8); ctx.fill();
+  ctx.fillStyle = "#14425f"; ctx.font = "bold 13px sans-serif";
+  if (eventNow) {
+    ctx.fillText("⚠️ 異常気象 発生中：" + eventNow.icon + eventNow.name, cardX + 10, cardY + 21);
+    ctx.font = "12px sans-serif";
+    ctx.fillText("あと " + Math.max(0, Math.ceil(eventEndsAt - timeSec)) + " 秒", cardX + 10, cardY + 40);
+  } else {
+    const remain = Math.max(0, Math.ceil(nextEventAt - timeSec));
+    ctx.fillText("🛰️ 気象予報：次は " + nextEvent.icon + nextEvent.name, cardX + 10, cardY + 21);
+    ctx.font = "12px sans-serif";
+    ctx.fillText("あと " + remain + " 秒", cardX + 10, cardY + 40);
+  }
+  // 現在の風
+  const cw = currentWind();
+  ctx.fillStyle = "rgba(10,30,45,0.78)"; ctx.fillRect(8, 42, 176, 26);
+  ctx.fillStyle = "#bfe6f7"; ctx.font = "13px sans-serif";
+  ctx.fillText("いまの風：" + (cw > 10 ? "→ " + Math.round(cw) : cw < -10 ? "← " + Math.round(-cw) : "凪"), 14, 60);
+
+  if (gameState === "over") {
+    ctx.fillStyle = "rgba(30,10,10,0.78)"; ctx.fillRect(0, H / 2 - 70, W, 140);
+    ctx.fillStyle = "#ffd9d9"; ctx.font = "bold 34px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("ゲームオーバー", W / 2, H / 2 - 12);
+    ctx.font = "18px sans-serif";
+    ctx.fillText("SCORE " + score + "（WAVE " + wave + "）", W / 2, H / 2 + 22);
+    ctx.fillText("Rキー or クリックで再挑戦", W / 2, H / 2 + 50);
+  }
+}
+
+// ===== メインループ =====
+let lastT = 0;
+function loop(ts) {
+  const dt = Math.min(0.033, (ts - lastT) / 1000 || 0.016);
+  lastT = ts;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+resetGame();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
