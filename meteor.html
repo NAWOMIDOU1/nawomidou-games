@@ -1,0 +1,479 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>メテオストーム｜3分間の縦スクロールシューティング</title>
+<style>
+  body { margin:0; background:#0d1420; color:#e8eef7; font-family:"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif; text-align:center; }
+  h1 { font-size:20px; margin:12px 0 4px; }
+  p.howto { font-size:13px; color:#aebdd2; margin:4px 12px 8px; line-height:1.7; }
+  canvas { background:#14231a; border:2px solid #3f6ea5; border-radius:8px; max-width:96vw; height:auto; touch-action:none; }
+  .note { font-size:12px; color:#7e8ea8; margin:6px 0 14px; }
+</style>
+</head>
+<body>
+<h1>🌠 メテオストーム</h1>
+<p class="howto">3分間のスコアアタック。矢印キー／ドラッグで移動、スペース／押しっぱなしで発射。<br>
+パワーアップは3種類：<b>3方向ミサイル</b>・<b>レーザー</b>・<b>子機</b>（最大2つ）。全部そろうと最強形態です。</p>
+<canvas id="game" width="540" height="720"></canvas>
+<p class="note">NAWOMIDOUゲーム館 第14弾</p>
+<script>
+"use strict";
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = 540, H = 720;
+const GAME_TIME = 180; // 3分間
+const GROUND_SCROLL = 41;
+
+let gameState = "title"; // title | play | over
+let score = 0, hiScore = 0, lives = 3, timeLeft = GAME_TIME, elapsed = 0;
+let player = { x: W / 2, y: H - 110, inv: 0 };
+let bullets = [], enemies = [], ebullets = [], ground = [], items = [], particles = [], texts = [];
+let weapons = { spread: false, laser: false, pods: 0 };
+let fireCool = 0, spawnT = 1.2, groundT = 2.0, carrierT = 8, dropCount = 0, boss = null, bossSpawned = false, timeSec = 0;
+let deco = [];
+try { hiScore = parseInt(localStorage.getItem("meteorStormHi") || "0", 10) || 0; } catch (e) { hiScore = 0; }
+
+const keys = {};
+let pointerDown = false, pointerX = null, pointerY = null;
+addEventListener("keydown", (e) => {
+  if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+  keys[e.key] = true;
+  if (gameState !== "play" && (e.key === " " || e.key === "Enter")) startGame();
+});
+addEventListener("keyup", (e) => { keys[e.key] = false; });
+function canvasPos(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * (W / r.width), y: (e.clientY - r.top) * (H / r.height) };
+}
+canvas.addEventListener("pointerdown", (e) => {
+  const p = canvasPos(e); pointerDown = true; pointerX = p.x; pointerY = p.y;
+  if (gameState !== "play") startGame();
+});
+canvas.addEventListener("pointermove", (e) => { if (pointerDown) { const p = canvasPos(e); pointerX = p.x; pointerY = p.y; } });
+addEventListener("pointerup", () => { pointerDown = false; });
+
+function startGame() {
+  score = 0; lives = 3; timeLeft = GAME_TIME; elapsed = 0; timeSec = 0;
+  player = { x: W / 2, y: H - 110, inv: 0 };
+  bullets = []; enemies = []; ebullets = []; ground = []; items = []; particles = []; texts = [];
+  weapons = { spread: false, laser: false, pods: 0 };
+  fireCool = 0; spawnT = 1.2; groundT = 2.0; carrierT = 8; dropCount = 0;
+  boss = null; bossSpawned = false;
+  gameState = "play";
+}
+
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, s = 30 + Math.random() * 120;
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.35 + Math.random() * 0.3, color });
+  }
+}
+function addText(x, y, str, color) { texts.push({ x, y, str, color: color || "#ffe082", life: 0.9 }); }
+function addScore(n, x, y) { score += n; if (x !== undefined) addText(x, y, "+" + n); }
+
+// ---------- 敵・地上物の出現 ----------
+function spawnEnemy() {
+  const r = Math.random();
+  const x = 50 + Math.random() * (W - 100);
+  if (r < 0.42) {
+    // 小型機：まっすぐ＋わずかな揺れ
+    enemies.push({ type: "dart", x, y: -24, hp: 1, t: Math.random() * 6, baseX: x, score: 100, r: 13 });
+  } else if (r < 0.72) {
+    // 蛇行機
+    enemies.push({ type: "weaver", x, y: -24, hp: 1, t: Math.random() * 6, baseX: x, score: 150, r: 13 });
+  } else {
+    // 急降下機：少し進んでから自機へ向けて降下
+    enemies.push({ type: "diver", x, y: -24, hp: 2, t: 0, state: "enter", vx: 0, vy: 0, score: 200, r: 14 });
+  }
+}
+function spawnCarrier() {
+  const x = 80 + Math.random() * (W - 160);
+  enemies.push({ type: "carrier", x, y: -34, hp: 7, t: 0, baseX: x, score: 300, r: 22, carrier: true });
+}
+function spawnGround() {
+  const x = 44 + Math.random() * (W - 88);
+  const r = Math.random();
+  if (r < 0.4) ground.push({ type: "base", x, y: -30, hp: 3, score: 300, r: 20 });
+  else if (r < 0.75) ground.push({ type: "turret", x, y: -30, hp: 4, score: 400, r: 17, fireT: 1.6 + Math.random() });
+  else ground.push({ type: "box", x, y: -30, hp: 2, score: 200, r: 15, box: true });
+}
+const ITEM_KINDS = ["spread", "laser", "pod"];
+function dropItem(x, y) {
+  const kind = ITEM_KINDS[dropCount % 3]; dropCount++;
+  items.push({ x, y, kind, t: 0 });
+}
+function spawnBoss() {
+  boss = { x: W / 2, y: -90, hp: 750, maxHp: 750, t: 0, fireT: 1.2, entered: false };
+  bossSpawned = true;
+  addText(W / 2, 150, "⚠ 大型要塞接近 ⚠", "#ff8a80");
+}
+
+// ---------- 攻撃 ----------
+function shoot(x, y, angle) {
+  bullets.push({ x, y, vx: Math.sin(angle) * 290, vy: -Math.cos(angle) * 290 });
+}
+function playerFire(dt) {
+  fireCool -= dt;
+  const firing = keys[" "] || pointerDown;
+  if (!firing || fireCool > 0) return;
+  fireCool = 0.13;
+  shoot(player.x, player.y - 18, 0);
+  if (weapons.spread) { shoot(player.x - 6, player.y - 12, -0.24); shoot(player.x + 6, player.y - 12, 0.24); }
+  for (let i = 0; i < weapons.pods; i++) {
+    const px = player.x + (i === 0 ? -36 : 36);
+    shoot(px, player.y - 6, 0);
+  }
+}
+function laserDamage(dt) {
+  if (!weapons.laser) return;
+  if (!(keys[" "] || pointerDown)) return;
+  const bx = player.x, top = 0, bot = player.y - 16, half = 10;
+  const dps = 46 * dt;
+  for (const e of enemies) if (Math.abs(e.x - bx) < half + e.r && e.y < bot && e.y > top - 30) e.hp -= dps;
+  for (const g of ground) if (Math.abs(g.x - bx) < half + g.r && g.y < bot) g.hp -= dps;
+  if (boss && boss.entered && Math.abs(boss.x - bx) < 120 && boss.y < bot) boss.hp -= dps;
+}
+
+function hitPlayer() {
+  if (player.inv > 0 || gameState !== "play") return;
+  lives--;
+  burst(player.x, player.y, "#ffab91", 22);
+  weapons = { spread: false, laser: false, pods: 0 };
+  player.inv = 2.5;
+  if (lives < 0) { gameState = "over"; saveHi(); }
+}
+function saveHi() {
+  if (score > hiScore) { hiScore = score; try { localStorage.setItem("meteorStormHi", String(hiScore)); } catch (e) {} }
+}
+
+// ---------- 更新 ----------
+function update(dt) {
+  for (const d of deco) { d.y += GROUND_SCROLL * d.s * dt; if (d.y > H + 6) { d.y = -6; d.x = Math.random() * W; } }
+  updateParticles(dt);
+  if (gameState !== "play") return;
+  timeSec += dt; elapsed += dt; timeLeft = Math.max(0, GAME_TIME - elapsed);
+  if (timeLeft <= 0) { gameState = "over"; saveHi(); return; }
+  if (player.inv > 0) player.inv -= dt;
+
+  // 移動
+  const spd = 152;
+  if (keys["ArrowLeft"] || keys["a"]) player.x -= spd * dt;
+  if (keys["ArrowRight"] || keys["d"]) player.x += spd * dt;
+  if (keys["ArrowUp"] || keys["w"]) player.y -= spd * dt;
+  if (keys["ArrowDown"] || keys["s"]) player.y += spd * dt;
+  if (pointerDown && pointerX !== null) {
+    const tx = pointerX, ty = pointerY - 56;
+    const dx = tx - player.x, dy = ty - player.y;
+    const d = Math.hypot(dx, dy);
+    if (d > 4) { const v = Math.min(d * 9, 280) * dt; player.x += dx / d * v; player.y += dy / d * v; }
+  }
+  player.x = Math.max(20, Math.min(W - 20, player.x));
+  player.y = Math.max(H * 0.3, Math.min(H - 24, player.y));
+
+  playerFire(dt);
+  laserDamage(dt);
+
+  // 出現スケジュール
+  if (!bossSpawned) {
+    spawnT -= dt;
+    if (spawnT <= 0) { spawnEnemy(); spawnT = Math.max(0.62, 1.5 - elapsed * 0.006); }
+    groundT -= dt;
+    if (groundT <= 0) { spawnGround(); groundT = 2.2 + Math.random() * 1.8; }
+    carrierT -= dt;
+    if (carrierT <= 0) { spawnCarrier(); carrierT = 14 + Math.random() * 5; }
+    if (timeLeft <= 30) spawnBoss();
+  }
+
+  // 自機の弾
+  for (const b of bullets) { b.x += b.vx * dt; b.y += b.vy * dt; if (b.y < -14 || b.x < -14 || b.x > W + 14) b.dead = true; }
+  // 敵
+  for (const e of enemies) {
+    e.t += dt;
+    if (e.type === "dart") { e.y += 74 * dt; e.x = e.baseX + Math.sin(e.t * 2.2) * 14; }
+    else if (e.type === "weaver") { e.y += 56 * dt; e.x = e.baseX + Math.sin(e.t * 3.1) * 62; }
+    else if (e.type === "carrier") { e.y += 31 * dt; e.x = e.baseX + Math.sin(e.t * 1.2) * 26; }
+    else if (e.type === "diver") {
+      if (e.state === "enter") {
+        e.y += 59 * dt;
+        if (e.y > 120) { e.state = "dive"; const dx = player.x - e.x, dy = player.y - e.y, d = Math.hypot(dx, dy) || 1; e.vx = dx / d * 109; e.vy = dy / d * 109; }
+      } else { e.x += e.vx * dt; e.y += e.vy * dt; }
+    }
+    if (e.y > H + 44 || e.x < -60 || e.x > W + 60) e.dead = true;
+    // 自機との接触
+    if (!e.dead && Math.hypot(e.x - player.x, e.y - player.y) < e.r + 13) { e.dead = true; burst(e.x, e.y, "#ffcc80", 10); hitPlayer(); }
+  }
+  // 地上物
+  for (const g of ground) {
+    g.y += GROUND_SCROLL * dt;
+    if (g.y > H + 44) g.dead = true;
+    if (g.type === "turret" && !g.dead && g.y > 10 && g.y < player.y - 60) {
+      g.fireT -= dt;
+      if (g.fireT <= 0 && ebullets.length < 14) {
+        g.fireT = 2.7;
+        const dx = player.x - g.x, dy = player.y - g.y, d = Math.hypot(dx, dy) || 1;
+        ebullets.push({ x: g.x, y: g.y - 10, vx: dx / d * 89, vy: dy / d * 89 });
+      }
+    }
+  }
+  // 敵弾
+  for (const b of ebullets) {
+    b.x += b.vx * dt; b.y += b.vy * dt;
+    if (b.y < -12 || b.y > H + 12 || b.x < -12 || b.x > W + 12) b.dead = true;
+    if (!b.dead && Math.hypot(b.x - player.x, b.y - player.y) < 15) { b.dead = true; hitPlayer(); }
+  }
+  // ボス
+  if (boss) {
+    boss.t += dt;
+    if (!boss.entered) { boss.y += 28 * dt; if (boss.y >= 108) { boss.y = 108; boss.entered = true; } }
+    else {
+      boss.x = W / 2 + Math.sin(boss.t * 0.45) * 120;
+      boss.fireT -= dt;
+      if (boss.fireT <= 0 && ebullets.length < 22) {
+        boss.fireT = 0.85;
+        for (const off of [-70, 0, 70]) {
+          const dx = player.x - (boss.x + off), dy = player.y - (boss.y + 30), d = Math.hypot(dx, dy) || 1;
+          ebullets.push({ x: boss.x + off, y: boss.y + 34, vx: dx / d * 84, vy: dy / d * 84 });
+        }
+      }
+      if (Math.hypot(boss.x - player.x, boss.y - player.y) < 110) hitPlayer();
+    }
+    if (boss.hp <= 0) {
+      addScore(5000, boss.x, boss.y); burst(boss.x, boss.y, "#ffab91", 40); burst(boss.x, boss.y, "#ffe082", 30);
+      boss = null;
+    }
+  }
+  // アイテム
+  for (const it of items) {
+    it.t += dt; it.y += 46 * dt;
+    if (it.y > H + 24) it.dead = true;
+    if (!it.dead && Math.hypot(it.x - player.x, it.y - player.y) < 30) {
+      it.dead = true;
+      if (it.kind === "spread") { if (weapons.spread) addScore(500, it.x, it.y); else { weapons.spread = true; addText(it.x, it.y, "3方向ミサイル!", "#81d4fa"); } }
+      if (it.kind === "laser") { if (weapons.laser) addScore(500, it.x, it.y); else { weapons.laser = true; addText(it.x, it.y, "レーザー!", "#ce93d8"); } }
+      if (it.kind === "pod") { if (weapons.pods >= 2) addScore(500, it.x, it.y); else { weapons.pods++; addText(it.x, it.y, "子機!", "#a5d6a7"); } }
+      burst(it.x, it.y, "#ffffff", 8);
+    }
+  }
+  // 弾の命中
+  for (const b of bullets) {
+    if (b.dead) continue;
+    for (const e of enemies) {
+      if (!e.dead && Math.hypot(e.x - b.x, e.y - b.y) < e.r + 5) { e.hp -= 1; b.dead = true; break; }
+    }
+    if (b.dead) continue;
+    for (const g of ground) {
+      if (!g.dead && Math.hypot(g.x - b.x, g.y - b.y) < g.r + 5) { g.hp -= 1; b.dead = true; break; }
+    }
+    if (b.dead) continue;
+    if (boss && boss.entered && Math.abs(b.x - boss.x) < 128 && Math.abs(b.y - boss.y) < 52) { boss.hp -= 1; b.dead = true; }
+  }
+  // 撃破の処理
+  for (const e of enemies) if (!e.dead && e.hp <= 0) { e.dead = true; addScore(e.score, e.x, e.y); burst(e.x, e.y, "#ffcc80", 12); if (e.carrier) dropItem(e.x, e.y); }
+  for (const g of ground) if (!g.dead && g.hp <= 0) { g.dead = true; addScore(g.score, g.x, g.y); burst(g.x, g.y, "#bcaaa4", 10); if (g.box) dropItem(g.x, g.y); }
+  bullets = bullets.filter((b) => !b.dead);
+  enemies = enemies.filter((e) => !e.dead);
+  ebullets = ebullets.filter((b) => !b.dead);
+  ground = ground.filter((g) => !g.dead);
+  items = items.filter((i) => !i.dead);
+}
+function updateParticles(dt) {
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; }
+  particles = particles.filter((p) => p.life > 0);
+  for (const t of texts) { t.y -= 34 * dt; t.life -= dt; }
+  texts = texts.filter((t) => t.life > 0);
+}
+
+// ---------- 描画 ----------
+function drawShip(x, y, s, main) {
+  ctx.save(); ctx.translate(x, y); ctx.scale(s, s);
+  ctx.fillStyle = main ? "#4fc3f7" : "#81d4fa";
+  ctx.beginPath();
+  ctx.moveTo(0, -18); ctx.lineTo(6, -4); ctx.lineTo(17, 10); ctx.lineTo(17, 15); ctx.lineTo(6, 12);
+  ctx.lineTo(3, 16); ctx.lineTo(-3, 16); ctx.lineTo(-6, 12); ctx.lineTo(-17, 15); ctx.lineTo(-17, 10);
+  ctx.lineTo(-6, -4); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#e1f5fe"; ctx.beginPath(); ctx.ellipse(0, -6, 3.6, 6.5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#ff7043";
+  const fl = 4 + Math.random() * 5;
+  ctx.beginPath(); ctx.moveTo(-3, 16); ctx.lineTo(0, 16 + fl); ctx.lineTo(3, 16); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+function draw() {
+  // 地面（スクロールする大地）
+  ctx.fillStyle = "#14231a"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#1a2f21";
+  const off = (timeSec * GROUND_SCROLL) % 90;
+  for (let y = -90 + off; y < H; y += 90) for (let x = 0; x < W; x += 90) ctx.fillRect(x + 45, y, 45, 45);
+  ctx.fillStyle = "#274434"; // 道路
+  ctx.fillRect(96, 0, 22, H); ctx.fillRect(W - 118, 0, 22, H);
+  ctx.fillStyle = "#3c5c46";
+  for (const d of deco) ctx.fillRect(d.x, d.y, 3, 3);
+
+  // 地上物
+  for (const g of ground) {
+    ctx.save(); ctx.translate(g.x, g.y);
+    if (g.type === "base") {
+      ctx.fillStyle = "#78909c"; ctx.fillRect(-19, -14, 38, 28);
+      ctx.fillStyle = "#546e7a"; ctx.beginPath(); ctx.arc(0, -2, 11, Math.PI, 0); ctx.fill();
+      ctx.fillStyle = "#37474f"; ctx.fillRect(-3, -22, 6, 10);
+    } else if (g.type === "turret") {
+      ctx.fillStyle = "#8d6e63"; ctx.beginPath(); ctx.arc(0, 0, 16, 0, Math.PI * 2); ctx.fill();
+      const a = Math.atan2(player.y - g.y, player.x - g.x);
+      ctx.strokeStyle = "#4e342e"; ctx.lineWidth = 5;
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(a) * 20, Math.sin(a) * 20); ctx.stroke();
+      ctx.fillStyle = "#5d4037"; ctx.beginPath(); ctx.arc(0, 0, 8, 0, Math.PI * 2); ctx.fill();
+    } else {
+      ctx.fillStyle = "#fb8c00"; ctx.fillRect(-14, -14, 28, 28);
+      ctx.strokeStyle = "#e65100"; ctx.lineWidth = 3; ctx.strokeRect(-14, -14, 28, 28);
+      ctx.fillStyle = "#fff3e0"; ctx.font = "bold 15px sans-serif"; ctx.textAlign = "center"; ctx.fillText("P", 0, 6);
+    }
+    ctx.restore();
+  }
+
+  // ボス
+  if (boss) {
+    ctx.save(); ctx.translate(boss.x, boss.y);
+    ctx.fillStyle = "#6a4c93"; ctx.fillRect(-128, -38, 256, 76);
+    ctx.fillStyle = "#8268ad"; ctx.fillRect(-90, -52, 180, 20);
+    ctx.fillStyle = "#4527a0"; ctx.beginPath(); ctx.arc(0, 0, 26, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#ffd54f"; ctx.beginPath(); ctx.arc(0, 0, 11 + Math.sin(timeSec * 5) * 2, 0, Math.PI * 2); ctx.fill();
+    for (const offx of [-70, 70]) { ctx.fillStyle = "#37474f"; ctx.beginPath(); ctx.arc(offx, 26, 12, 0, Math.PI * 2); ctx.fill(); }
+    ctx.restore();
+    if (boss.entered) { // HPゲージ
+      ctx.fillStyle = "#263238"; ctx.fillRect(W / 2 - 130, 34, 260, 9);
+      ctx.fillStyle = "#ef5350"; ctx.fillRect(W / 2 - 130, 34, 260 * Math.max(0, boss.hp / boss.maxHp), 9);
+    }
+  }
+
+  // 敵
+  for (const e of enemies) {
+    ctx.save(); ctx.translate(e.x, e.y);
+    if (e.type === "dart") {
+      ctx.fillStyle = "#ef5350";
+      ctx.beginPath(); ctx.moveTo(0, 15); ctx.lineTo(10, -8); ctx.lineTo(3, -12); ctx.lineTo(-3, -12); ctx.lineTo(-10, -8); ctx.closePath(); ctx.fill();
+    } else if (e.type === "weaver") {
+      ctx.fillStyle = "#ab47bc";
+      ctx.beginPath(); ctx.moveTo(0, 14); ctx.lineTo(13, 2); ctx.lineTo(8, -11); ctx.lineTo(-8, -11); ctx.lineTo(-13, 2); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#f3e5f5"; ctx.beginPath(); ctx.arc(0, 0, 4, 0, Math.PI * 2); ctx.fill();
+    } else if (e.type === "diver") {
+      ctx.fillStyle = "#ffa726";
+      const a = e.state === "dive" ? Math.atan2(e.vy, e.vx) + Math.PI / 2 : Math.PI;
+      ctx.rotate(a - Math.PI);
+      ctx.beginPath(); ctx.moveTo(0, 15); ctx.lineTo(11, -9); ctx.lineTo(0, -5); ctx.lineTo(-11, -9); ctx.closePath(); ctx.fill();
+    } else { // carrier
+      ctx.fillStyle = "#26a69a";
+      ctx.fillRect(-22, -14, 44, 28);
+      ctx.fillStyle = "#00897b"; ctx.fillRect(-14, -20, 28, 8);
+      ctx.fillStyle = "#e0f2f1"; ctx.font = "bold 14px sans-serif"; ctx.textAlign = "center"; ctx.fillText("P", 0, 6);
+      if (e.hp < 7) { ctx.fillStyle = "#37474f"; ctx.fillRect(-20, 16, 40, 4); ctx.fillStyle = "#80cbc4"; ctx.fillRect(-20, 16, 40 * e.hp / 7, 4); }
+    }
+    ctx.restore();
+  }
+
+  // アイテム
+  for (const it of items) {
+    ctx.save(); ctx.translate(it.x, it.y);
+    const bob = Math.sin(it.t * 4) * 3; ctx.translate(0, bob);
+    ctx.fillStyle = it.kind === "spread" ? "#1565c0" : it.kind === "laser" ? "#6a1b9a" : "#2e7d32";
+    ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = "#ffffff";
+    if (it.kind === "spread") { for (const dx of [-6, 0, 6]) { ctx.beginPath(); ctx.arc(dx, dx === 0 ? -3 : 2, 2.4, 0, Math.PI * 2); ctx.fill(); } }
+    else if (it.kind === "laser") { ctx.fillRect(-2, -8, 4, 16); }
+    else { ctx.beginPath(); ctx.moveTo(0, -7); ctx.lineTo(5, 5); ctx.lineTo(-5, 5); ctx.closePath(); ctx.fill(); }
+    ctx.restore();
+  }
+
+  // レーザー
+  if (gameState === "play" && weapons.laser && (keys[" "] || pointerDown)) {
+    const bx = player.x;
+    const grad = ctx.createLinearGradient(bx - 8, 0, bx + 8, 0);
+    grad.addColorStop(0, "rgba(206,147,216,0.12)");
+    grad.addColorStop(0.5, "rgba(225,190,231,0.85)");
+    grad.addColorStop(1, "rgba(206,147,216,0.12)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(bx - 8, 0, 16, player.y - 16);
+    ctx.fillStyle = "rgba(255,255,255,0.9)";
+    ctx.fillRect(bx - 2, 0, 4, player.y - 16);
+  }
+
+  // 自機と子機
+  if (gameState !== "title") {
+    const blink = player.inv > 0 && Math.floor(timeSec * 12) % 2 === 0;
+    if (!blink) {
+      for (let i = 0; i < weapons.pods; i++) drawShip(player.x + (i === 0 ? -36 : 36), player.y + 4, 0.62, false);
+      drawShip(player.x, player.y, 1, true);
+    }
+  }
+  // 弾
+  ctx.fillStyle = "#fff59d";
+  for (const b of bullets) { ctx.beginPath(); ctx.arc(b.x, b.y, 3.6, 0, Math.PI * 2); ctx.fill(); }
+  ctx.fillStyle = "#ff8a65";
+  for (const b of ebullets) { ctx.beginPath(); ctx.arc(b.x, b.y, 4.6, 0, Math.PI * 2); ctx.fill(); }
+
+  // パーティクル・テキスト
+  for (const p of particles) { ctx.globalAlpha = Math.max(0, p.life * 2.4); ctx.fillStyle = p.color; ctx.fillRect(p.x - 2, p.y - 2, 4, 4); }
+  ctx.globalAlpha = 1;
+  ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center";
+  for (const t of texts) { ctx.globalAlpha = Math.max(0, Math.min(1, t.life * 1.6)); ctx.fillStyle = t.color; ctx.fillText(t.str, t.x, t.y); }
+  ctx.globalAlpha = 1;
+
+  // HUD
+  ctx.fillStyle = "#e8eef7"; ctx.font = "bold 17px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("SCORE " + score, 12, 24);
+  ctx.textAlign = "right"; ctx.fillText("HI " + Math.max(hiScore, score), W - 12, 24);
+  ctx.textAlign = "center";
+  const mm = Math.floor(timeLeft / 60), ss = Math.floor(timeLeft % 60);
+  ctx.fillStyle = timeLeft <= 30 && gameState === "play" ? "#ff8a80" : "#e8eef7";
+  ctx.fillText("TIME " + mm + ":" + (ss < 10 ? "0" : "") + ss, W / 2, 24);
+  ctx.fillStyle = "#e8eef7"; ctx.textAlign = "left";
+  ctx.fillText("自機 " + "🔺".repeat(Math.max(0, lives)), 12, H - 12);
+  ctx.textAlign = "right"; ctx.font = "bold 13px sans-serif";
+  const wtxt = (weapons.spread ? "3方向 " : "") + (weapons.laser ? "レーザー " : "") + (weapons.pods ? "子機×" + weapons.pods : "");
+  ctx.fillText(wtxt || "ノーマルショット", W - 12, H - 12);
+
+  if (gameState === "title") {
+    ctx.fillStyle = "rgba(6,14,24,0.78)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#ffe082"; ctx.font = "bold 38px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("🌠 メテオストーム", W / 2, 210);
+    ctx.fillStyle = "#e8eef7"; ctx.font = "16px sans-serif";
+    ctx.fillText("3分間の縦スクロール・スコアアタック", W / 2, 252);
+    ctx.fillText("敵や地上物を撃って、パワーアップを集めよう", W / 2, 282);
+    ctx.font = "bold 15px sans-serif";
+    ctx.fillStyle = "#81d4fa"; ctx.fillText("● 3方向ミサイル", W / 2, 330);
+    ctx.fillStyle = "#ce93d8"; ctx.fillText("● レーザー（貫通）", W / 2, 358);
+    ctx.fillStyle = "#a5d6a7"; ctx.fillText("● 子機（最大2つ・一緒に撃つ）", W / 2, 386);
+    ctx.fillStyle = "#e8eef7"; ctx.font = "15px sans-serif";
+    ctx.fillText("残り30秒で大型要塞が出現。撃破で5000点!", W / 2, 428);
+    ctx.fillText("当たると装備はリセット。残機3つ", W / 2, 456);
+    ctx.font = "bold 19px sans-serif"; ctx.fillStyle = "#ffe082";
+    ctx.fillText("クリック／スペースでスタート", W / 2, 520);
+  }
+  if (gameState === "over") {
+    ctx.fillStyle = "rgba(6,14,24,0.8)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#ffe082"; ctx.font = "bold 36px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(timeLeft <= 0 ? "TIME UP!" : "GAME OVER", W / 2, 280);
+    ctx.fillStyle = "#e8eef7"; ctx.font = "bold 22px sans-serif";
+    ctx.fillText("SCORE " + score, W / 2, 336);
+    ctx.font = "16px sans-serif";
+    ctx.fillText("HI-SCORE " + hiScore, W / 2, 368);
+    ctx.fillText("クリック／スペースでもう一度", W / 2, 430);
+  }
+}
+
+// ---------- メインループ ----------
+for (let i = 0; i < 46; i++) deco.push({ x: Math.random() * W, y: Math.random() * H, s: 0.6 + Math.random() * 0.9 });
+let lastTs = 0;
+function loop(ts) {
+  const dt = Math.min(0.033, (ts - lastTs) / 1000 || 0.016);
+  lastTs = ts;
+  if (gameState === "title") timeSec += dt;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
