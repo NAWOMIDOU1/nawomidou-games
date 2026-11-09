@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>クロスブーメラン｜真夜中の吸血鬼退治</title>
+<style>
+  body { margin:0; background:#0d1420; color:#e8eef7; font-family:"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif; text-align:center; }
+  h1 { font-size:20px; margin:12px 0 4px; }
+  p.howto { font-size:13px; color:#aebdd2; margin:4px 12px 8px; line-height:1.7; }
+  canvas { background:#1d2c40; border:2px solid #6d5a7a; border-radius:8px; max-width:96vw; height:auto; touch-action:none; }
+  .note { font-size:12px; color:#7e8ea8; margin:6px 0 14px; }
+</style>
+</head>
+<body>
+<h1>✝️ クロスブーメラン</h1>
+<p class="howto">矢印キー／WASD／ドラッグで神父を移動、スペース／押しっぱなしで十字架を投げます。十字架は四角く飛んで手元に戻ります。<br>
+吸血鬼が村人に触れ続けると村人も吸血鬼に。吸血鬼が下の教会の姫に届いたら即ゲームオーバーです。<br>
+時々出る<strong>ショットガン</strong>を拾うと、30秒だけまっすぐ連射できます。</p>
+<canvas id="game" width="900" height="600"></canvas>
+<p class="note">NAWOMIDOUゲーム館 第15弾</p>
+<script>
+"use strict";
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = 900, H = 600;
+const GATE = { x1: 418, x2: 482, y1: 26, y2: 96 };
+const CHURCH = { x1: 386, x2: 514, y1: 506, y2: 600 };
+const MAIDEN = { x: W / 2, y: 552 };
+
+let gameState = "title"; // title | play | clear | over
+let score = 0, hiScore = 0, lives = 3, stage = 1, timeSec = 0;
+let priest = { x: W / 2, y: 462, fx: 0, fy: -1, inv: 0 };
+let cross = { held: true, x: 0, y: 0, phase: 0, dx: 0, dy: -1, px: 0, py: 0, left: 0, spin: 0 };
+let vampires = [], villagers = [], bats = [], pellets = [], particles = [], texts = [];
+let pendingVamp = 0, vampSpawnT = 0, batT = 6;
+let gateOpen = false, gateCycleT = 9, stunT = 0, clearT = 0, overByMaiden = false;
+let shotgun = { active: false, t: 0, item: null, spawnT: 11, fireCool: 0 };
+try { hiScore = parseInt(localStorage.getItem("crossBoomerangHi") || "0", 10) || 0; } catch (e) { hiScore = 0; }
+
+const keys = {};
+let pointerDown = false, pointerX = null, pointerY = null;
+addEventListener("keydown", (e) => {
+  if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+  keys[e.key] = true;
+  if (gameState !== "play" && gameState !== "clear" && (e.key === " " || e.key === "Enter")) startGame();
+});
+addEventListener("keyup", (e) => { keys[e.key] = false; });
+function canvasPos(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * (W / r.width), y: (e.clientY - r.top) * (H / r.height) };
+}
+canvas.addEventListener("pointerdown", (e) => {
+  const p = canvasPos(e); pointerDown = true; pointerX = p.x; pointerY = p.y;
+  if (gameState !== "play" && gameState !== "clear") startGame();
+});
+canvas.addEventListener("pointermove", (e) => { if (pointerDown) { const p = canvasPos(e); pointerX = p.x; pointerY = p.y; } });
+addEventListener("pointerup", () => { pointerDown = false; });
+function firing() { return keys[" "] || pointerDown; }
+
+function startGame() {
+  score = 0; lives = 3; stage = 1; overByMaiden = false;
+  setupStage();
+  gameState = "play";
+}
+function setupStage() {
+  priest = { x: W / 2, y: 462, fx: 0, fy: -1, inv: 1.2 };
+  cross = { held: true, x: 0, y: 0, phase: 0, dx: 0, dy: -1, px: 0, py: 0, left: 0, spin: 0 };
+  vampires = []; bats = []; pellets = []; particles = []; texts = [];
+  villagers = [];
+  for (let i = 0; i < 3; i++) {
+    villagers.push({ x: 140 + Math.random() * (W - 280), y: 170 + Math.random() * 280, dx: 0, dy: 0, turn: 0, wt: Math.random() * 2 });
+  }
+  pendingVamp = Math.min(3 + (stage - 1) * 2, 14);
+  vampSpawnT = 0.3;
+  batT = 5 + Math.random() * 3;
+  gateOpen = false; gateCycleT = 8;
+  stunT = 0;
+  shotgun.item = null; shotgun.spawnT = 10 + Math.random() * 6;
+}
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, s = 26 + Math.random() * 100;
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.3 + Math.random() * 0.3, color });
+  }
+}
+function addText(x, y, str, color) { texts.push({ x, y, str, color: color || "#ffe082", life: 1.0 }); }
+function addScore(n, x, y) { score += n; if (x !== undefined) addText(x, y, "+" + n); }
+function saveHi() {
+  if (score > hiScore) { hiScore = score; try { localStorage.setItem("crossBoomerangHi", String(hiScore)); } catch (e) {} }
+}
+function vampSpeed() { return Math.min(30 + stage * 2.2, 52); }
+
+// ---------- 十字架 ----------
+function throwCross() {
+  cross.held = false;
+  cross.x = priest.x + priest.fx * 14; cross.y = priest.y + priest.fy * 14;
+  cross.dx = priest.fx; cross.dy = priest.fy;
+  cross.px = -priest.fy; cross.py = priest.fx; // 垂直方向
+  cross.phase = 1; cross.left = 205;
+}
+function updateCross(dt) {
+  if (cross.held) {
+    if (firing() && gameState === "play" && !shotgun.active) throwCross();
+    return;
+  }
+  cross.spin += dt * 9;
+  const CSPD = 218;
+  if (cross.phase === 1) {
+    const d = Math.min(CSPD * dt, cross.left);
+    cross.x += cross.dx * d; cross.y += cross.dy * d; cross.left -= d;
+    if (cross.left <= 0) { cross.phase = 2; cross.left = 138; }
+  } else if (cross.phase === 2) {
+    const d = Math.min(CSPD * dt, cross.left);
+    cross.x += cross.px * d; cross.y += cross.py * d; cross.left -= d;
+    if (cross.left <= 0) cross.phase = 3;
+  } else {
+    const dx = priest.x - cross.x, dy = priest.y - cross.y, dist = Math.hypot(dx, dy);
+    if (dist < 20) { cross.held = true; cross.phase = 0; return; }
+    const d = Math.min(CSPD * 1.1 * dt, dist);
+    cross.x += dx / dist * d; cross.y += dy / dist * d;
+  }
+  cross.x = Math.max(10, Math.min(W - 10, cross.x));
+  cross.y = Math.max(8, Math.min(H - 8, cross.y));
+  // 門が開いているときに十字架が入ると全滅
+  if (gateOpen && cross.x > GATE.x1 && cross.x < GATE.x2 && cross.y > GATE.y1 && cross.y < GATE.y2) {
+    for (const v of vampires) { addScore(100, v.x, v.y); burst(v.x, v.y, "#e1bee7", 10); }
+    vampires = []; pendingVamp = 0;
+    addText(W / 2, 130, "門に命中! 全滅!", "#ffe082");
+    cross.held = true; cross.phase = 0;
+  }
+}
+function crossKills() {
+  if (cross.held) return;
+  for (const v of vampires) {
+    if (!v.dead && Math.hypot(v.x - cross.x, v.y - cross.y) < 27) { v.dead = true; addScore(100, v.x, v.y); burst(v.x, v.y, "#e1bee7", 10); }
+  }
+  for (const b of bats) {
+    if (!b.dead && Math.hypot(b.x - cross.x, b.y - cross.y) < 24) killBat(b);
+  }
+}
+
+// ---------- ショットガン ----------
+function updateShotgun(dt) {
+  if (shotgun.active) {
+    shotgun.t -= dt;
+    if (shotgun.t <= 0) { shotgun.active = false; addText(priest.x, priest.y - 30, "ショットガン終了", "#b0bec5"); }
+  } else if (!shotgun.item) {
+    shotgun.spawnT -= dt;
+    if (shotgun.spawnT <= 0) {
+      shotgun.item = { x: 90 + Math.random() * (W - 180), y: 150 + Math.random() * 300, ttl: 9 };
+      shotgun.spawnT = 22 + Math.random() * 8;
+    }
+  }
+  if (shotgun.item) {
+    shotgun.item.ttl -= dt;
+    if (shotgun.item.ttl <= 0) shotgun.item = null;
+    else if (Math.hypot(shotgun.item.x - priest.x, shotgun.item.y - priest.y) < 26) {
+      shotgun.item = null; shotgun.active = true; shotgun.t = 30;
+      addText(priest.x, priest.y - 30, "ショットガン! 30秒", "#a5d6a7");
+      burst(priest.x, priest.y, "#a5d6a7", 10);
+    }
+  }
+  shotgun.fireCool -= dt;
+  if (shotgun.active && firing() && shotgun.fireCool <= 0) {
+    shotgun.fireCool = 0.3;
+    for (const off of [-0.13, 0, 0.13]) {
+      const a = Math.atan2(priest.fy, priest.fx) + off;
+      pellets.push({ x: priest.x + priest.fx * 16, y: priest.y + priest.fy * 16, vx: Math.cos(a) * 430, vy: Math.sin(a) * 430, dist: 0 });
+    }
+    burst(priest.x + priest.fx * 20, priest.y + priest.fy * 20, "#ffcc80", 2);
+  }
+  for (const p of pellets) {
+    p.x += p.vx * dt; p.y += p.vy * dt; p.dist += 430 * dt;
+    if (p.dist > 305 || p.x < 6 || p.x > W - 6 || p.y < 6 || p.y > H - 6) p.dead = true;
+    if (p.dead) continue;
+    for (const v of vampires) if (!v.dead && Math.hypot(v.x - p.x, v.y - p.y) < 17) { v.dead = true; p.dead = true; addScore(100, v.x, v.y); burst(v.x, v.y, "#e1bee7", 8); break; }
+    if (p.dead) continue;
+    for (const b of bats) if (!b.dead && Math.hypot(b.x - p.x, b.y - p.y) < 15) { killBat(b); p.dead = true; break; }
+  }
+  pellets = pellets.filter((p) => !p.dead);
+}
+function killBat(b) {
+  b.dead = true;
+  const d = Math.hypot(b.x - priest.x, b.y - priest.y);
+  if (d < 80) { addScore(1000, b.x, b.y); stunT = 4; addText(W / 2, 200, "至近距離! 吸血鬼がシビれた!", "#80d8ff"); }
+  else if (d < 175) addScore(300, b.x, b.y);
+  else addScore(100, b.x, b.y);
+  burst(b.x, b.y, "#90a4ae", 8);
+}
+
+// ---------- 吸血鬼・村人・コウモリ ----------
+function spawnVampire() {
+  vampires.push({ x: GATE.x1 + 8 + Math.random() * (GATE.x2 - GATE.x1 - 16), y: GATE.y2 + 8, tx: 0, ty: 0, wt: 0, dead: false });
+}
+function updateVampires(dt) {
+  if (pendingVamp > 0) {
+    vampSpawnT -= dt;
+    if (vampSpawnT <= 0) { spawnVampire(); pendingVamp--; vampSpawnT = 0.7; }
+  }
+  const spd = vampSpeed();
+  for (const v of vampires) {
+    if (stunT > 0) continue;
+    v.wt -= dt;
+    if (v.wt <= 0) {
+      v.wt = 2 + Math.random() * 2;
+      const r = Math.random();
+      if (r < 0.34 && villagers.length) {
+        let best = villagers[0], bd = 1e9;
+        for (const p of villagers) { const d = Math.hypot(p.x - v.x, p.y - v.y); if (d < bd) { bd = d; best = p; } }
+        v.tx = best.x; v.ty = best.y;
+      } else if (r < 0.55) { v.tx = MAIDEN.x + (Math.random() - 0.5) * 70; v.ty = MAIDEN.y; }
+      else { v.tx = 60 + Math.random() * (W - 120); v.ty = 120 + Math.random() * 390; }
+    }
+    const dx = v.tx - v.x, dy = v.ty - v.y, d = Math.hypot(dx, dy);
+    if (d > 6) { v.x += dx / d * spd * dt; v.y += dy / d * spd * dt; }
+    // 教会に侵入 = 姫のもとへ
+    if (v.x > CHURCH.x1 + 8 && v.x < CHURCH.x2 - 8 && v.y > CHURCH.y1 + 6) {
+      gameState = "over"; overByMaiden = true; saveHi(); return;
+    }
+    // 神父に接触
+    if (priest.inv <= 0 && Math.hypot(v.x - priest.x, v.y - priest.y) < 25) hitPriest();
+  }
+  vampires = vampires.filter((v) => !v.dead);
+}
+function updateVillagers(dt) {
+  for (const p of villagers) {
+    p.wt -= dt;
+    if (p.wt <= 0) {
+      p.wt = 1.6 + Math.random() * 2;
+      const a = Math.random() * Math.PI * 2;
+      p.dx = Math.cos(a); p.dy = Math.sin(a);
+    }
+    p.x += p.dx * 24 * dt; p.y += p.dy * 24 * dt;
+    p.x = Math.max(30, Math.min(W - 30, p.x));
+    p.y = Math.max(126, Math.min(492, p.y));
+    let contact = false;
+    for (const v of vampires) if (Math.hypot(v.x - p.x, v.y - p.y) < 26) { contact = true; break; }
+    if (contact && stunT <= 0) p.turn += dt / 3.5;
+    else p.turn = Math.max(0, p.turn - dt / 6);
+    if (p.turn >= 1) {
+      p.dead = true;
+      vampires.push({ x: p.x, y: p.y, tx: p.x, ty: p.y, wt: 0, dead: false });
+      addText(p.x, p.y - 18, "吸血鬼になった!", "#ef9a9a");
+      burst(p.x, p.y, "#ef9a9a", 10);
+    }
+  }
+  villagers = villagers.filter((p) => !p.dead);
+}
+function updateBats(dt) {
+  batT -= dt;
+  if (batT <= 0 && bats.length < 3) {
+    batT = 7 + Math.random() * 4;
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    bats.push({ x: dir > 0 ? GATE.x1 : GATE.x2, y: 58 + Math.random() * 30, dir, dive: false, vx: 0, vy: 0, t: Math.random() * 6, dead: false });
+  }
+  for (const b of bats) {
+    b.t += dt;
+    if (!b.dive) {
+      b.x += b.dir * 66 * dt;
+      if (Math.abs(b.x - priest.x) < 11 && priest.y > b.y + 30) {
+        b.dive = true;
+        const dx = priest.x - b.x, dy = priest.y - b.y, d = Math.hypot(dx, dy) || 1;
+        b.vx = dx / d * 148; b.vy = dy / d * 148;
+      }
+      if (b.x < -30 || b.x > W + 30) b.dead = true;
+    } else {
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      if (b.y > H + 20 || b.x < -30 || b.x > W + 30) b.dead = true;
+      if (!b.dead && priest.inv <= 0 && Math.hypot(b.x - priest.x, b.y - priest.y) < 22) { b.dead = true; hitPriest(); }
+    }
+  }
+  bats = bats.filter((b) => !b.dead);
+}
+function hitPriest() {
+  if (gameState !== "play") return;
+  lives--;
+  burst(priest.x, priest.y, "#ffab91", 18);
+  if (lives < 0) { gameState = "over"; saveHi(); return; }
+  priest.x = W / 2; priest.y = 462; priest.inv = 2.2;
+  cross.held = true; cross.phase = 0;
+}
+
+// ---------- 全体更新 ----------
+function update(dt) {
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; }
+  particles = particles.filter((p) => p.life > 0);
+  for (const t of texts) { t.y -= 30 * dt; t.life -= dt; }
+  texts = texts.filter((t) => t.life > 0);
+  if (gameState === "title") { timeSec += dt; return; }
+  if (gameState === "clear") {
+    clearT -= dt;
+    if (clearT <= 0) { stage++; setupStage(); gameState = "play"; }
+    return;
+  }
+  if (gameState !== "play") return;
+  timeSec += dt;
+  if (priest.inv > 0) priest.inv -= dt;
+  if (stunT > 0) stunT -= dt;
+
+  // 門の開閉
+  gateCycleT -= dt;
+  if (gateCycleT <= 0) { gateOpen = !gateOpen; gateCycleT = gateOpen ? 4 : 8 + Math.random() * 4; if (gateOpen) addText(W / 2, 122, "門が開いた!", "#ffe082"); }
+
+  // 神父の移動
+  let mx = 0, my = 0;
+  if (keys["ArrowLeft"] || keys["a"]) mx -= 1;
+  if (keys["ArrowRight"] || keys["d"]) mx += 1;
+  if (keys["ArrowUp"] || keys["w"]) my -= 1;
+  if (keys["ArrowDown"] || keys["s"]) my += 1;
+  if (pointerDown && pointerX !== null) {
+    const dx = pointerX - priest.x, dy = pointerY - priest.y, d = Math.hypot(dx, dy);
+    if (d > 8) { mx = dx / d; my = dy / d; }
+  }
+  const PSPD = 152;
+  if (mx !== 0 || my !== 0) {
+    const d = Math.hypot(mx, my);
+    priest.x += mx / d * PSPD * dt;
+    priest.y += my / d * PSPD * dt;
+    priest.fx = mx / d; priest.fy = my / d;
+  }
+  priest.x = Math.max(22, Math.min(W - 22, priest.x));
+  priest.y = Math.max(112, Math.min(498, priest.y));
+
+  updateCross(dt);
+  crossKills();
+  updateShotgun(dt);
+  updateVampires(dt);
+  if (gameState !== "play") return;
+  updateVillagers(dt);
+  updateBats(dt);
+
+  // 面クリア
+  if (gameState === "play" && vampires.length === 0 && pendingVamp === 0) {
+    addScore(500);
+    gameState = "clear"; clearT = 2.4;
+    burst(W / 2, 60, "#ffab91", 26);
+  }
+}
+
+// ---------- 描画 ----------
+function drawCrossShape(x, y, s, spin) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(spin); ctx.scale(s, s);
+  ctx.fillStyle = "#ffd54f";
+  ctx.fillRect(-2.5, -11, 5, 22);
+  ctx.fillRect(-7.5, -5, 15, 5);
+  ctx.restore();
+}
+function draw() {
+  // 夜の中庭
+  ctx.fillStyle = "#1d2c40"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#233650";
+  for (let y = 110; y < H - 100; y += 56) for (let x = ((y / 56) % 2) * 40; x < W; x += 80) ctx.fillRect(x, y, 40, 28);
+  ctx.fillStyle = "#f5f0dc"; ctx.beginPath(); ctx.arc(W - 66, 44, 21, 0, Math.PI * 2); ctx.fill(); // 月
+  ctx.fillStyle = "#1d2c40"; ctx.beginPath(); ctx.arc(W - 78, 38, 18, 0, Math.PI * 2); ctx.fill();
+
+  // 城（上部）
+  ctx.fillStyle = "#4a4458"; ctx.fillRect(300, 8, 300, 88);
+  ctx.fillStyle = "#3a3547"; ctx.fillRect(282, 0, 44, 104); ctx.fillRect(574, 0, 44, 104);
+  ctx.fillStyle = "#57506b";
+  for (let x = 292; x < 610; x += 26) ctx.fillRect(x, 0, 13, 12);
+  // 門
+  if (gateOpen) {
+    ctx.fillStyle = "#120e1c"; ctx.fillRect(GATE.x1, GATE.y1, GATE.x2 - GATE.x1, GATE.y2 - GATE.y1);
+    ctx.fillStyle = "#6d5a7a"; ctx.fillRect(GATE.x1 - 8, GATE.y1, 9, GATE.y2 - GATE.y1); ctx.fillRect(GATE.x2 - 1, GATE.y1, 9, GATE.y2 - GATE.y1);
+    ctx.fillStyle = "#ffe082"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center"; ctx.fillText("OPEN", W / 2, GATE.y1 - 6);
+  } else {
+    ctx.fillStyle = "#5d4037"; ctx.fillRect(GATE.x1, GATE.y1, GATE.x2 - GATE.x1, GATE.y2 - GATE.y1);
+    ctx.strokeStyle = "#3e2723"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(W / 2, GATE.y1); ctx.lineTo(W / 2, GATE.y2); ctx.stroke();
+  }
+
+  // 教会（下部）
+  ctx.fillStyle = "#6b5a4a"; ctx.fillRect(CHURCH.x1, CHURCH.y1 + 22, CHURCH.x2 - CHURCH.x1, CHURCH.y2 - CHURCH.y1 - 22);
+  ctx.fillStyle = "#54453a";
+  ctx.beginPath(); ctx.moveTo(CHURCH.x1 - 8, CHURCH.y1 + 24); ctx.lineTo(W / 2, CHURCH.y1 - 8); ctx.lineTo(CHURCH.x2 + 8, CHURCH.y1 + 24); ctx.closePath(); ctx.fill();
+  drawCrossShape(W / 2, CHURCH.y1 + 2, 0.8, 0);
+  // 眠る姫
+  ctx.fillStyle = "#f8bbd0"; ctx.fillRect(MAIDEN.x - 26, MAIDEN.y + 6, 52, 12);
+  ctx.fillStyle = "#ffe0ec"; ctx.beginPath(); ctx.arc(MAIDEN.x - 20, MAIDEN.y + 4, 8, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#ffca28"; ctx.fillRect(MAIDEN.x - 28, MAIDEN.y - 5, 16, 5);
+  ctx.fillStyle = "#b3e5fc"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("Z z", MAIDEN.x + 22, MAIDEN.y - 2 + Math.sin(timeSec * 2) * 2);
+
+  // ショットガンのアイテム
+  if (shotgun.item) {
+    const it = shotgun.item;
+    const blink = it.ttl < 2 && Math.floor(timeSec * 8) % 2 === 0;
+    if (!blink) {
+      ctx.save(); ctx.translate(it.x, it.y);
+      ctx.fillStyle = "#2e7d32"; ctx.beginPath(); ctx.arc(0, 0, 16, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2; ctx.stroke();
+      ctx.fillStyle = "#37474f"; ctx.fillRect(-11, -2, 20, 5);
+      ctx.fillStyle = "#8d6e63"; ctx.fillRect(6, -1, 7, 7);
+      ctx.restore();
+      ctx.fillStyle = "#a5d6a7"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
+      ctx.fillText("SHOTGUN", it.x, it.y + 30);
+    }
+  }
+
+  // 村人
+  for (const p of villagers) {
+    ctx.save(); ctx.translate(p.x, p.y);
+    const r = Math.floor(94 + p.turn * 140), g = Math.floor(160 - p.turn * 60), b = Math.floor(190 - p.turn * 30);
+    ctx.fillStyle = `rgb(${r},${g},${b})`; ctx.fillRect(-6, -4, 12, 15);
+    ctx.fillStyle = "#f2c894"; ctx.beginPath(); ctx.arc(0, -10, 6, 0, Math.PI * 2); ctx.fill();
+    if (p.turn > 0.05) { ctx.fillStyle = "#ef5350"; ctx.fillRect(-8, -22, 16, 4); ctx.fillStyle = "#ff8a80"; ctx.fillRect(-8, -22, 16 * p.turn, 4); }
+    ctx.restore();
+  }
+  // 吸血鬼
+  for (const v of vampires) {
+    ctx.save(); ctx.translate(v.x, v.y);
+    ctx.fillStyle = "#311b4d";
+    ctx.beginPath(); ctx.moveTo(0, -12); ctx.lineTo(13, 12); ctx.lineTo(5, 8); ctx.lineTo(0, 13); ctx.lineTo(-5, 8); ctx.lineTo(-13, 12); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#eceff1"; ctx.beginPath(); ctx.arc(0, -8, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#263238"; ctx.fillRect(-5, -12, 3, 3); ctx.fillRect(2, -12, 3, 3);
+    ctx.fillStyle = "#ffffff"; ctx.fillRect(-3, -3, 2, 3); ctx.fillRect(1, -3, 2, 3);
+    if (stunT > 0) { ctx.fillStyle = "#80d8ff"; ctx.font = "11px sans-serif"; ctx.textAlign = "center"; ctx.fillText("✦ ✦", 0, -20); }
+    ctx.restore();
+  }
+  // コウモリ
+  for (const b of bats) {
+    ctx.save(); ctx.translate(b.x, b.y);
+    const flap = Math.sin(b.t * 16) * 6;
+    ctx.fillStyle = "#546e7a";
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(-13, -4 - flap); ctx.lineTo(-7, 3); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(13, -4 - flap); ctx.lineTo(7, 3); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, 4.6, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  // 弾（ショットガン）
+  ctx.fillStyle = "#ffcc80";
+  for (const p of pellets) { ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill(); }
+  // 十字架
+  if (!cross.held) drawCrossShape(cross.x, cross.y, 1.15, cross.spin);
+  // 神父
+  const blink = priest.inv > 0 && Math.floor(timeSec * 12) % 2 === 0;
+  if (gameState !== "title" && !blink) {
+    ctx.save(); ctx.translate(priest.x, priest.y);
+    ctx.fillStyle = "#263238"; ctx.fillRect(-7, -4, 14, 17);
+    ctx.fillStyle = "#f2c894"; ctx.beginPath(); ctx.arc(0, -10, 6.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#37474f"; ctx.fillRect(-7, -17, 14, 4);
+    ctx.restore();
+    if (cross.held && !shotgun.active) drawCrossShape(priest.x + priest.fx * 15, priest.y + priest.fy * 15, 0.85, 0);
+    if (shotgun.active) {
+      ctx.save(); ctx.translate(priest.x + priest.fx * 15, priest.y + priest.fy * 15); ctx.rotate(Math.atan2(priest.fy, priest.fx));
+      ctx.fillStyle = "#37474f"; ctx.fillRect(-4, -2, 20, 5);
+      ctx.fillStyle = "#8d6e63"; ctx.fillRect(-9, -1, 6, 7);
+      ctx.restore();
+    }
+  }
+  // パーティクル・テキスト
+  for (const p of particles) { ctx.globalAlpha = Math.max(0, p.life * 2.4); ctx.fillStyle = p.color; ctx.fillRect(p.x - 2, p.y - 2, 4, 4); }
+  ctx.globalAlpha = 1;
+  ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center";
+  for (const t of texts) { ctx.globalAlpha = Math.max(0, Math.min(1, t.life * 1.6)); ctx.fillStyle = t.color; ctx.fillText(t.str, t.x, t.y); }
+  ctx.globalAlpha = 1;
+
+  // HUD
+  ctx.fillStyle = "#e8eef7"; ctx.font = "bold 17px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("SCORE " + score, 12, 24);
+  ctx.textAlign = "right"; ctx.fillText("HI " + Math.max(hiScore, score), W - 12, 24);
+  ctx.textAlign = "center"; ctx.fillText("STAGE " + stage, W / 2, 24);
+  ctx.textAlign = "left"; ctx.font = "bold 14px sans-serif";
+  ctx.fillText("神父 " + "✝".repeat(Math.max(0, lives)), 12, H - 12);
+  if (shotgun.active) {
+    ctx.textAlign = "right"; ctx.fillStyle = "#a5d6a7";
+    ctx.fillText("SHOTGUN " + Math.ceil(shotgun.t) + "秒", W - 12, H - 12);
+    ctx.fillStyle = "#2e7d32"; ctx.fillRect(W - 172, H - 8, 160, 4);
+    ctx.fillStyle = "#a5d6a7"; ctx.fillRect(W - 172, H - 8, 160 * shotgun.t / 30, 4);
+  } else if (stunT > 0) {
+    ctx.textAlign = "right"; ctx.fillStyle = "#80d8ff"; ctx.fillText("シビれ中!", W - 12, H - 12);
+  }
+
+  if (gameState === "title") {
+    ctx.fillStyle = "rgba(6,10,20,0.8)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#e1bee7"; ctx.font = "bold 36px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("✝️ クロスブーメラン", W / 2, 190);
+    ctx.fillStyle = "#e8eef7"; ctx.font = "16px sans-serif";
+    ctx.fillText("真夜中の中庭で、吸血鬼を全滅させよう", W / 2, 232);
+    ctx.fillText("十字架は四角く飛んで手元に戻る。戻るまで次は投げられない", W / 2, 262);
+    ctx.fillText("村人に吸血鬼が触れ続けると、村人も吸血鬼に!", W / 2, 292);
+    ctx.fillText("吸血鬼が教会の姫に届いたら即ゲームオーバー", W / 2, 322);
+    ctx.fillStyle = "#80d8ff";
+    ctx.fillText("コウモリは至近距離で倒すほど高得点。1000点で敵がシビれる", W / 2, 358);
+    ctx.fillStyle = "#ffe082";
+    ctx.fillText("門が開いたら、十字架を門へ! 全滅の近道", W / 2, 388);
+    ctx.fillStyle = "#a5d6a7";
+    ctx.fillText("時々出るショットガンは30秒だけ、まっすぐ連射できる", W / 2, 418);
+    ctx.fillStyle = "#ffe082"; ctx.font = "bold 19px sans-serif";
+    ctx.fillText("クリック／スペースでスタート", W / 2, 478);
+  }
+  if (gameState === "clear") {
+    ctx.fillStyle = "rgba(6,10,20,0.55)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#ffe082"; ctx.font = "bold 34px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("STAGE " + stage + " CLEAR!", W / 2, 280);
+    ctx.fillStyle = "#e8eef7"; ctx.font = "16px sans-serif";
+    ctx.fillText("ボーナス 500点", W / 2, 316);
+  }
+  if (gameState === "over") {
+    ctx.fillStyle = "rgba(6,10,20,0.82)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#ef9a9a"; ctx.font = "bold 36px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("GAME OVER", W / 2, 250);
+    ctx.fillStyle = "#e8eef7"; ctx.font = "17px sans-serif";
+    if (overByMaiden) ctx.fillText("吸血鬼が姫のもとへ届いてしまった…", W / 2, 292);
+    ctx.font = "bold 22px sans-serif";
+    ctx.fillText("SCORE " + score, W / 2, 340);
+    ctx.font = "16px sans-serif";
+    ctx.fillText("HI-SCORE " + hiScore + " / 到達 STAGE " + stage, W / 2, 372);
+    ctx.fillText("クリック／スペースでもう一度", W / 2, 424);
+  }
+}
+
+// ---------- メインループ ----------
+let lastTs = 0;
+function loop(ts) {
+  const dt = Math.min(0.033, (ts - lastTs) / 1000 || 0.016);
+  lastTs = ts;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
