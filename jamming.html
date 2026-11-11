@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ジャミングピンポン｜電波妨害テーブルテニス</title>
+<style>
+  body { margin:0; background:#0a1410; color:#dce8dc; font-family:"Hiragino Maru Gothic ProN","Hiragino Sans","Noto Sans JP",sans-serif; text-align:center; }
+  h1 { font-size:20px; margin:14px 0 4px; color:#9fe8c8; letter-spacing:2px; }
+  p.howto { font-size:13px; color:#8aa894; margin:2px 0 8px; line-height:1.7; }
+  canvas { background:#14532d; border:2px solid #2a6a44; border-radius:8px; max-width:96vw; height:auto; touch-action:none; }
+  p.note { font-size:12px; color:#5f7a68; margin:8px 0 16px; }
+</style>
+</head>
+<body>
+<h1>🏓 ジャミングピンポン</h1>
+<p class="howto">
+左のパドルを↑↓キー／W・S／マウス／ドラッグで動かして打ち返すテーブルテニスです。先に15点を取った方が勝ち。<br>
+ときどき妨害電波のジャミングがかかります。障害物が10個出る・玉がワープする・玉が3つに分裂する、のどれかで邪魔されます。分裂した玉は、全部入り切るまで続き、点はそのまま入ります。
+</p>
+<canvas id="game" width="900" height="600"></canvas>
+<p class="note">NAWOMIDOUゲーム館 第17弾</p>
+<script>
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+const W = 900, H = 600;
+const PAD_H = 86, PAD_W = 12, PX = 30, CX = W - 42, BALL_R = 8, WIN_SCORE = 15;
+
+let mode = 'title'; // title / serve / play / point / over
+let pScore = 0, cScore = 0, serveT = 0, pointT = 0;
+let py = 300, cy = 300;
+let balls = [];
+let hits = 0;
+let obstacles = [];
+let jam = { state: 'idle', t: 330, type: null, dur: 0, warpT: 0, fx: [] };
+let winner = '';
+let wins = +(localStorage.getItem('jammingPingPongWins') || 0);
+let keys = {};
+let ptrY = null;
+
+addEventListener('keydown', e => {
+  if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown',' '].includes(e.key)) e.preventDefault();
+  keys[e.key.toLowerCase()] = true;
+  if (e.key === ' ') actionPress();
+});
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+function ptrToY(e) {
+  const r = cv.getBoundingClientRect();
+  return (e.clientY - r.top) * (H / r.height);
+}
+cv.addEventListener('pointerdown', e => { ptrY = ptrToY(e); actionPress(); });
+cv.addEventListener('pointermove', e => { if (ptrY !== null) ptrY = ptrToY(e); });
+addEventListener('pointerup', () => { ptrY = null; });
+
+function keyU() { return keys['arrowup'] || keys['w']; }
+function keyD() { return keys['arrowdown'] || keys['s']; }
+
+function actionPress() {
+  if (mode === 'title' || mode === 'over') startGame();
+}
+
+function startGame() {
+  pScore = 0; cScore = 0; winner = '';
+  obstacles = [];
+  jam = { state: 'idle', t: 330, type: null, dur: 0, warpT: 0, fx: [] };
+  serve(Math.random() < 0.5 ? 1 : -1);
+}
+
+function serve(dir) {
+  balls = [{ x: W / 2, y: H / 2, vx: 2.4 * dir, vy: (Math.random() * 0.9 - 0.45) }];
+  hits = 0;
+  mode = 'serve';
+  serveT = 65;
+}
+
+function awardPoint(who) {
+  if (who === 'P') pScore++; else cScore++;
+  if (pScore >= WIN_SCORE || cScore >= WIN_SCORE) {
+    winner = pScore >= WIN_SCORE ? 'P' : 'C';
+    if (winner === 'P') { wins++; localStorage.setItem('jammingPingPongWins', wins); }
+    mode = 'over';
+    return true;
+  }
+  return false;
+}
+function endRally() {
+  if (jam.state === 'split') { jam.state = 'idle'; jam.t = 400 + Math.random() * 240; }
+  mode = 'point';
+  pointT = 80;
+}
+
+function applyJam(type) {
+  jam.type = type;
+  if (type === 'obstacle') {
+    jam.state = 'obstacle';
+    jam.dur = 480;
+    obstacles = [];
+    let guard = 0;
+    while (obstacles.length < 10 && guard++ < 300) {
+      const kind = Math.random();
+      const w = kind < 0.4 ? 26 : (kind < 0.7 ? 92 : 34);
+      const h = kind < 0.4 ? 92 : (kind < 0.7 ? 26 : 34);
+      const x = 160 + Math.random() * (W - 320 - w);
+      const y = 80 + Math.random() * (H - 190 - h);
+      if (Math.abs(x + w / 2 - W / 2) < 78 && Math.abs(y + h / 2 - H / 2) < 78) continue;
+      let overlap = false;
+      for (const o of obstacles) {
+        if (x < o.x + o.w + 14 && x + w + 14 > o.x && y < o.y + o.h + 14 && y + h + 14 > o.y) { overlap = true; break; }
+      }
+      if (!overlap) obstacles.push({ x: x, y: y, w: w, h: h });
+    }
+  } else if (type === 'warp') {
+    jam.state = 'warp';
+    jam.dur = 170;
+    jam.warpT = 75;
+    doWarp();
+  } else if (type === 'split') {
+    jam.state = 'split';
+    const b = balls[0];
+    if (b) {
+      const sp = Math.hypot(b.vx, b.vy);
+      const base = Math.atan2(b.vy, b.vx);
+      for (const da of [-0.5, 0.5]) {
+        balls.push({ x: b.x, y: b.y, vx: Math.cos(base + da) * sp, vy: Math.sin(base + da) * sp });
+      }
+    }
+  }
+}
+
+function doWarp() {
+  const b = balls[0];
+  if (!b) return;
+  jam.fx.push({ x: b.x, y: b.y, t: 26 });
+  b.x = W - b.x;
+  b.y = 90 + Math.random() * (H - 180);
+  jam.fx.push({ x: b.x, y: b.y, t: 26 });
+}
+
+function updJam() {
+  for (let i = jam.fx.length - 1; i >= 0; i--) {
+    jam.fx[i].t--;
+    if (jam.fx[i].t <= 0) jam.fx.splice(i, 1);
+  }
+  if (jam.state === 'idle') {
+    jam.t--;
+    if (jam.t <= 0) { jam.state = 'warn'; jam.t = 42; }
+  } else if (jam.state === 'warn') {
+    jam.t--;
+    if (jam.t <= 0) {
+      const types = ['obstacle', 'warp', 'split'];
+      applyJam(types[Math.floor(Math.random() * 3)]);
+    }
+  } else if (jam.state === 'obstacle') {
+    jam.dur--;
+    if (jam.dur <= 0) { obstacles = []; jam.state = 'idle'; jam.t = 420 + Math.random() * 260; }
+  } else if (jam.state === 'warp') {
+    jam.dur--;
+    jam.warpT--;
+    if (jam.warpT === 0) doWarp();
+    if (jam.dur <= 0) { jam.state = 'idle'; jam.t = 420 + Math.random() * 260; }
+  }
+}
+
+function bounceOffPaddle(b, isPlayer) {
+  const cyP = isPlayer ? py : cy;
+  const offset = Math.max(-1, Math.min(1, (b.y - cyP) / (PAD_H / 2)));
+  const speed = Math.min(2.4 + hits * 0.07, 4.4);
+  hits++;
+  const ang = offset * 0.95;
+  b.vx = Math.cos(ang) * speed * (isPlayer ? 1 : -1);
+  b.vy = Math.sin(ang) * speed;
+  b.x = isPlayer ? PX + PAD_W + BALL_R + 0.5 : CX - BALL_R - 0.5;
+}
+
+function updPlay() {
+  // プレイヤー
+  if (ptrY !== null) py += Math.max(-6, Math.min(6, ptrY - py));
+  else {
+    if (keyU()) py -= 3.4;
+    if (keyD()) py += 3.4;
+  }
+  py = Math.max(PAD_H / 2 + 6, Math.min(H - PAD_H / 2 - 6, py));
+  // CPU：自分に向かってくる玉のうち一番近いものを追う
+  let target = null, best = 1e9;
+  for (const b of balls) {
+    if (b.vx > 0) { const t = (CX - b.x) / b.vx; if (t > 0 && t < best) { best = t; target = b; } }
+  }
+  const ty = target ? target.y : H / 2;
+  const diff = ty - cy;
+  const cs = 1.75;
+  if (Math.abs(diff) > 5) cy += Math.sign(diff) * Math.min(cs, Math.abs(diff));
+  cy = Math.max(PAD_H / 2 + 6, Math.min(H - PAD_H / 2 - 6, cy));
+
+  updJam();
+
+  for (let bi = balls.length - 1; bi >= 0; bi--) {
+    const b = balls[bi];
+    b.x += b.vx;
+    b.y += b.vy;
+    if (b.y < BALL_R + 36) { b.y = BALL_R + 36; b.vy = Math.abs(b.vy); }
+    if (b.y > H - BALL_R) { b.y = H - BALL_R; b.vy = -Math.abs(b.vy); }
+    // 障害物
+    for (const ob of obstacles) {
+      if (b.x + BALL_R > ob.x && b.x - BALL_R < ob.x + ob.w && b.y + BALL_R > ob.y && b.y - BALL_R < ob.y + ob.h) {
+        const penL = (b.x + BALL_R) - ob.x, penR = (ob.x + ob.w) - (b.x - BALL_R);
+        const penT = (b.y + BALL_R) - ob.y, penB = (ob.y + ob.h) - (b.y - BALL_R);
+        const m = Math.min(penL, penR, penT, penB);
+        if (m === penL) { b.x = ob.x - BALL_R; b.vx = -Math.abs(b.vx); }
+        else if (m === penR) { b.x = ob.x + ob.w + BALL_R; b.vx = Math.abs(b.vx); }
+        else if (m === penT) { b.y = ob.y - BALL_R; b.vy = -Math.abs(b.vy); }
+        else { b.y = ob.y + ob.h + BALL_R; b.vy = Math.abs(b.vy); }
+        break;
+      }
+    }
+    // パドル
+    if (b.vx < 0 && b.x - BALL_R <= PX + PAD_W && b.x - BALL_R >= PX - 8 && Math.abs(b.y - py) <= PAD_H / 2 + BALL_R) {
+      bounceOffPaddle(b, true);
+    }
+    if (b.vx > 0 && b.x + BALL_R >= CX && b.x + BALL_R <= CX + PAD_W + 8 && Math.abs(b.y - cy) <= PAD_H / 2 + BALL_R) {
+      bounceOffPaddle(b, false);
+    }
+    // 得点：その玉は抜けて、残りの玉で続行。全部抜けたらラリー終了
+    if (b.x < -12 || b.x > W + 12) {
+      const ended = awardPoint(b.x < -12 ? 'C' : 'P');
+      balls.splice(bi, 1);
+      if (ended) return;
+      if (balls.length === 0) { endRally(); return; }
+    }
+  }
+}
+
+function loop() {
+  if (mode === 'serve') {
+    serveT--;
+    if (serveT <= 0) mode = 'play';
+  } else if (mode === 'play') {
+    updPlay();
+  } else if (mode === 'point') {
+    pointT--;
+    if (pointT <= 0) serve(Math.random() < 0.5 ? 1 : -1);
+  }
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// ===== 描画 =====
+function drawTable() {
+  ctx.fillStyle = '#14532d'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#0d3a20'; ctx.fillRect(0, 0, W, 36);
+  ctx.strokeStyle = 'rgba(240,248,240,0.75)'; ctx.lineWidth = 3;
+  ctx.strokeRect(14, 48, W - 28, H - 62);
+  ctx.setLineDash([10, 10]);
+  ctx.beginPath(); ctx.moveTo(W / 2, 48); ctx.lineTo(W / 2, H - 14); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath(); ctx.moveTo(14, H / 2 + 17); ctx.lineTo(W - 14, H / 2 + 17); ctx.stroke();
+}
+function drawPaddle(x, centerY, color) {
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.roundRect(x, centerY - PAD_H / 2, PAD_W, PAD_H, 6);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.fillRect(x + 3, centerY - PAD_H / 2 + 6, 3, PAD_H - 12);
+}
+function drawScores() {
+  ctx.fillStyle = '#f0f8f0'; ctx.font = 'bold 24px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('YOU ' + pScore + ' : ' + cScore + ' CPU', W / 2, 27);
+  ctx.font = '12px sans-serif'; ctx.fillStyle = '#9fc8a8';
+  ctx.fillText(WIN_SCORE + '点先取', W / 2 + 168, 27);
+  // ジャミング表示（アンテナ）
+  const ax = W - 62, ay = 12;
+  ctx.strokeStyle = jam.state === 'idle' ? '#5f8a6c' : '#e84a3a';
+  ctx.lineWidth = 2.4;
+  ctx.beginPath(); ctx.moveTo(ax, ay + 16); ctx.lineTo(ax, ay + 4); ctx.stroke();
+  for (let i = 0; i < 3; i++) {
+    ctx.beginPath(); ctx.arc(ax, ay + 6, 4 + i * 4.5, -2.4, -0.7); ctx.stroke();
+  }
+  ctx.font = 'bold 11px sans-serif'; ctx.fillStyle = jam.state === 'idle' ? '#5f8a6c' : '#e84a3a';
+  ctx.fillText(jam.state === 'idle' ? 'JAM待機' : 'JAMMING', ax + 22, ay + 15);
+  ctx.textAlign = 'left';
+}
+function drawJamBanner() {
+  if (jam.state === 'warn') {
+    ctx.fillStyle = 'rgba(20,8,8,0.72)';
+    ctx.fillRect(0, 96, W, 56);
+    ctx.fillStyle = '#ff7a5a'; ctx.font = 'bold 25px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('⚠ 妨害電波を検知…', W / 2, 132);
+    ctx.textAlign = 'left';
+    ctx.strokeStyle = 'rgba(255,255,255,0.13)'; ctx.lineWidth = 1;
+    for (let i = 0; i < 26; i++) {
+      const y = Math.random() * H;
+      ctx.beginPath(); ctx.moveTo(Math.random() * W * 0.6, y); ctx.lineTo(Math.random() * W * 0.6 + 160, y); ctx.stroke();
+    }
+    return;
+  }
+  if (jam.state === 'idle') return;
+  const label = { obstacle: 'ジャミング：障害物×10 出現！', warp: 'ジャミング：玉がワープ！', split: 'ジャミング：玉が3つに分裂！' }[jam.state];
+  if (!label) return;
+  ctx.fillStyle = 'rgba(20,8,8,0.6)';
+  ctx.fillRect(0, 96, W, 50);
+  ctx.fillStyle = '#ffb35a'; ctx.font = 'bold 23px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(label, W / 2, 129);
+  ctx.textAlign = 'left';
+}
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  if (mode === 'title') {
+    ctx.fillStyle = '#0d3a20'; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = 'rgba(240,248,240,0.5)'; ctx.lineWidth = 3;
+    ctx.strokeRect(14, 48, W - 28, H - 62);
+    ctx.setLineDash([10, 10]);
+    ctx.beginPath(); ctx.moveTo(W / 2, 48); ctx.lineTo(W / 2, H - 14); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#f0f8f0'; ctx.font = 'bold 42px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('🏓 ジャミングピンポン', W / 2, 200);
+    ctx.font = '17px sans-serif'; ctx.fillStyle = '#9fe8c8';
+    ctx.fillText('15点先取のテーブルテニス。ただし現代の試合は電波妨害つき', W / 2, 240);
+    ctx.font = '16px sans-serif'; ctx.fillStyle = '#dce8dc';
+    ctx.fillText('ジャミングの邪魔は3種類', W / 2, 292);
+    ctx.fillText('・障害物がコートに10個出現して、玉が跳ね返る', W / 2, 322);
+    ctx.fillText('・玉が突然ワープする', W / 2, 350);
+    ctx.fillText('・玉が3つに分裂する（全部入り切るまで続行、点はそのまま入る）', W / 2, 378);
+    ctx.font = 'bold 19px sans-serif'; ctx.fillStyle = '#f0c86a';
+    ctx.fillText('クリック／スペースでスタート', W / 2, 436);
+    ctx.font = '14px sans-serif'; ctx.fillStyle = '#8aa894';
+    ctx.fillText('これまでの勝利数 ' + wins, W / 2, 472);
+    ctx.textAlign = 'left';
+    return;
+  }
+  drawTable();
+  for (const ob of obstacles) {
+    const blink = jam.dur < 90 && Math.floor(jam.dur / 8) % 2 === 0;
+    ctx.fillStyle = blink ? '#8a4a3a' : '#c85a3a';
+    ctx.fillRect(ob.x, ob.y, ob.w, ob.h);
+    ctx.strokeStyle = '#7a3220'; ctx.lineWidth = 1.5;
+    ctx.strokeRect(ob.x, ob.y, ob.w, ob.h);
+    if (ob.w >= 60 || ob.h >= 60) {
+      ctx.fillStyle = '#f0c8a8'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
+      if (ob.h >= 60) {
+        ctx.save();
+        ctx.translate(ob.x + ob.w / 2, ob.y + ob.h / 2);
+        ctx.rotate(Math.PI / 2);
+        ctx.fillText('JAM', 0, 4);
+        ctx.restore();
+      } else {
+        ctx.fillText('JAM', ob.x + ob.w / 2, ob.y + ob.h / 2 + 4);
+      }
+      ctx.textAlign = 'left';
+    }
+  }
+  for (const f of jam.fx) {
+    ctx.strokeStyle = 'rgba(160,120,255,' + (f.t / 26) + ')';
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(f.x, f.y, (26 - f.t) * 1.6 + 6, 0, 7); ctx.stroke();
+  }
+  drawPaddle(PX, py, '#3ec8e8');
+  drawPaddle(CX, cy, '#e86a5a');
+  for (const b of balls) {
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, 7); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.beginPath(); ctx.arc(b.x - b.vx * 2.2, b.y - b.vy * 2.2, BALL_R * 0.7, 0, 7); ctx.fill();
+  }
+  drawScores();
+  drawJamBanner();
+  if (mode === 'serve') {
+    ctx.fillStyle = '#f0f8f0'; ctx.font = 'bold 21px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('サーブ…', W / 2, 200);
+    ctx.textAlign = 'left';
+  }
+  if (mode === 'point') {
+    ctx.fillStyle = '#f0f8f0'; ctx.font = 'bold 26px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(pScore + ' : ' + cScore, W / 2, 200);
+    ctx.textAlign = 'left';
+  }
+  if (mode === 'over') {
+    ctx.fillStyle = 'rgba(6,16,10,0.72)';
+    ctx.fillRect(0, 190, W, 170);
+    ctx.fillStyle = winner === 'P' ? '#f0c86a' : '#9fc8a8';
+    ctx.font = 'bold 42px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(winner === 'P' ? '🏆 勝利！' : '敗北…', W / 2, 258);
+    ctx.font = '20px sans-serif'; ctx.fillStyle = '#f0f8f0';
+    ctx.fillText('最終スコア ' + pScore + ' : ' + cScore + '（勝利数 ' + wins + '）', W / 2, 296);
+    ctx.font = '16px sans-serif'; ctx.fillStyle = '#9fc8a8';
+    ctx.fillText('クリック／スペースでもう一試合', W / 2, 330);
+    ctx.textAlign = 'left';
+  }
+}
+
+serve(1);
+mode = 'title';
+requestAnimationFrame(loop);
+window.__JG = { get G() { return { mode: mode, pScore: pScore, cScore: cScore, balls: balls, obstacles: obstacles, jam: jam, py: py, cy: cy, winner: winner }; },
+  startGame: startGame,
+  applyJam: applyJam,
+  serve: serve,
+  setBall: function(i, o) { balls[i] = o; },
+  setScores: function(p, c) { pScore = p; cScore = c; },
+  setMode: function(m2) { mode = m2; },
+  setKey: function(k, v) { keys[k] = v; } };
+</script>
+</body>
+</html>
