@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>ブロック・プレッシャー｜NAWOMIDOUゲーム館</title>
+<style>
+  body { margin:0; background:#101018; color:#eee; font-family:sans-serif; text-align:center; }
+  h1 { font-size:20px; margin:10px 0 4px; }
+  p.howto { font-size:13px; color:#bbb; margin:2px 0 8px; }
+  canvas { background:#141428; display:block; margin:0 auto; max-width:96vw; height:auto; touch-action:none; }
+</style>
+</head>
+<body>
+<h1>ブロック・プレッシャー</h1>
+<p class="howto">遊び方：マウス／←→キー／指でバーを動かす。クリックかスペースで発射。上から新しいブロックが出てきて下へ押し出される（1面に4段まで）。赤いラインに届く前に全部壊せ。</p>
+<canvas id="game" width="900" height="600"></canvas>
+<script>
+(function(){
+"use strict";
+var W=900, H=600;
+var canvas=document.getElementById('game');
+var ctx=canvas.getContext('2d');
+
+var COLS=10, BW=80, BH=24, GAP=6, PITCH=BH+GAP;
+var OFFX=(W-(COLS*BW+(COLS-1)*GAP))/2;
+var TOPY=84;
+var DANGER_Y=H-58;            // このラインにブロックが届いたら負け
+var MAX_SPAWN=4;              // 1面で上から出てくる段数の上限
+var ROW_COLORS=['#e5534b','#e58a3c','#e5c53c','#6bc24a','#3ca7c9','#5b7fe5','#9a5be5','#e55ba0'];
+
+var hi=0;
+try{ hi=parseInt(localStorage.getItem('blockPressureHigh')||'0',10)||0; }catch(e){}
+
+var scene='title';
+var score=0, lives=3, stage=1;
+var blocks=[];
+var spawnTimer=0, spawnInterval=560, spawnCount=0, spawnColor=0;
+var clearTimer=0, overReason='';
+var flashT=0, frameCount=0;
+
+var paddle={ x:W/2-60, w:120, h:14, y:H-42 };
+var ball={ x:W/2, y:H-60, vx:0, vy:0, r:8, stuck:true };
+var keys={};
+
+function intervalFor(st){ return Math.max(400, 576-(st-1)*40); }   // 出現ペースは従来の降下の半分の速さ。面ごとに少し速くなる
+function rowsFor(st){ return Math.min(7, 3+st); }                  // stage1=4段 … stage5=7段
+function baseSpeedFor(st){ return 2.3+(st-1)*0.12; }
+
+function buildStage(st){
+  blocks=[];
+  var rows=rowsFor(st);
+  for(var r=0;r<rows;r++){
+    for(var c=0;c<COLS;c++){
+      blocks.push({ x:OFFX+c*(BW+GAP), y:TOPY+r*PITCH, w:BW, h:BH, color:ROW_COLORS[r%ROW_COLORS.length] });
+    }
+  }
+  spawnInterval=intervalFor(st);
+  spawnTimer=spawnInterval;
+  spawnCount=0;
+  spawnColor=rowsFor(st);
+}
+
+function resetBall(){
+  ball.stuck=true; ball.vx=0; ball.vy=0;
+  ball.x=paddle.x+paddle.w/2; ball.y=paddle.y-ball.r-1;
+}
+
+function startGame(){
+  score=0; lives=3; stage=1;
+  buildStage(stage);
+  resetBall();
+  scene='serve';
+}
+
+function launchBall(){
+  if(scene==='serve'|| (scene==='play'&&ball.stuck)){
+    var sp=baseSpeedFor(stage);
+    var ang=-Math.PI/2 + (Math.random()*0.5-0.25);
+    ball.vx=Math.cos(ang)*sp; ball.vy=Math.sin(ang)*sp;
+    ball.stuck=false; scene='play';
+  }
+}
+
+function lowestBottom(){
+  var m=0;
+  for(var i=0;i<blocks.length;i++){ var b=blocks[i].y+blocks[i].h; if(b>m)m=b; }
+  return m;
+}
+
+function spawnRow(){
+  if(spawnCount>=MAX_SPAWN) return;
+  var i;
+  for(i=0;i<blocks.length;i++) blocks[i].y+=PITCH;   // 既存の段を1段分押し出す
+  var gaps={}, ng=1+Math.floor(Math.random()*3), guard=0;
+  while(Object.keys(gaps).length<ng && guard++<50) gaps[Math.floor(Math.random()*COLS)]=1;
+  for(var c=0;c<COLS;c++){
+    if(gaps[c]) continue;
+    blocks.push({ x:OFFX+c*(BW+GAP), y:TOPY, w:BW, h:BH, color:ROW_COLORS[spawnColor%ROW_COLORS.length] });
+  }
+  spawnColor++; spawnCount++;
+  flashT=10;
+  if(lowestBottom()>=DANGER_Y){
+    scene='gameover'; overReason='ブロックがラインに到達した…';
+    saveHi();
+  }
+}
+
+function saveHi(){
+  if(score>hi){ hi=score; try{ localStorage.setItem('blockPressureHigh', String(hi)); }catch(e){} }
+}
+
+function stageClear(){
+  var remain=Math.max(0, DANGER_Y-lowestBottomSafe());
+  var bonus=500+remain*5;
+  score+=bonus;
+  scene='stageclear'; clearTimer=150;
+  saveHi();
+}
+function lowestBottomSafe(){ return blocks.length?lowestBottom():TOPY; }
+
+function ballLost(){
+  lives--;
+  if(lives<=0){ scene='gameover'; overReason='玉がなくなった…'; saveHi(); }
+  else { scene='serve'; resetBall(); }
+}
+
+function step(){
+  frameCount++;
+  // パドル操作
+  var spd=6;
+  if(keys['ArrowLeft']||keys['a']||keys['A']) paddle.x-=spd;
+  if(keys['ArrowRight']||keys['d']||keys['D']) paddle.x+=spd;
+  if(paddle.x<0)paddle.x=0;
+  if(paddle.x+paddle.w>W)paddle.x=W-paddle.w;
+
+  if(flashT>0)flashT--;
+
+  if(scene==='serve'){
+    ball.x=paddle.x+paddle.w/2; ball.y=paddle.y-ball.r-1;
+    return;
+  }
+  if(scene==='stageclear'){
+    clearTimer--;
+    if(clearTimer<=0){
+      if(stage>=5){ scene='gameclear'; saveHi(); }
+      else { stage++; buildStage(stage); resetBall(); scene='serve'; }
+    }
+    return;
+  }
+  if(scene!=='play') return;
+
+  // 出現タイマー（1面に4段まで）
+  if(spawnCount<MAX_SPAWN){
+    spawnTimer--;
+    if(spawnTimer<=0){ spawnRow(); spawnTimer=spawnInterval; if(scene!=='play')return; }
+  }
+
+  // 玉の移動
+  var sp=Math.sqrt(ball.vx*ball.vx+ball.vy*ball.vy);
+  var steps=Math.max(1, Math.ceil(sp/4));
+  for(var s=0;s<steps;s++){
+    ball.x+=ball.vx/steps; ball.y+=ball.vy/steps;
+    // 壁
+    if(ball.x-ball.r<0){ ball.x=ball.r; ball.vx=Math.abs(ball.vx); }
+    if(ball.x+ball.r>W){ ball.x=W-ball.r; ball.vx=-Math.abs(ball.vx); }
+    if(ball.y-ball.r<0){ ball.y=ball.r; ball.vy=Math.abs(ball.vy); }
+    // パドル
+    if(ball.vy>0 && ball.y+ball.r>=paddle.y && ball.y-ball.r<paddle.y+paddle.h &&
+       ball.x>paddle.x-ball.r && ball.x<paddle.x+paddle.w+ball.r){
+      var rel=(ball.x-(paddle.x+paddle.w/2))/(paddle.w/2);
+      if(rel>1)rel=1; if(rel<-1)rel=-1;
+      var cur=Math.sqrt(ball.vx*ball.vx+ball.vy*ball.vy);
+      var ang=rel*1.05; // 最大約60度
+      ball.vx=Math.sin(ang)*cur; ball.vy=-Math.cos(ang)*cur;
+      ball.y=paddle.y-ball.r-0.5;
+    }
+    // ブロック
+    for(var i=blocks.length-1;i>=0;i--){
+      var b=blocks[i];
+      if(ball.x+ball.r>b.x && ball.x-ball.r<b.x+b.w && ball.y+ball.r>b.y && ball.y-ball.r<b.y+b.h){
+        var overlapL=(ball.x+ball.r)-b.x, overlapR=(b.x+b.w)-(ball.x-ball.r);
+        var overlapT=(ball.y+ball.r)-b.y, overlapB=(b.y+b.h)-(ball.y-ball.r);
+        var minO=Math.min(overlapL,overlapR,overlapT,overlapB);
+        if(minO===overlapT||minO===overlapB) ball.vy=-ball.vy; else ball.vx=-ball.vx;
+        blocks.splice(i,1);
+        score+=100;
+        // 少しずつ加速（上限あり）
+        var cur2=Math.sqrt(ball.vx*ball.vx+ball.vy*ball.vy);
+        var cap=baseSpeedFor(stage)+0.9;
+        if(cur2<cap){ var f=Math.min(cap,cur2+0.02)/cur2; ball.vx*=f; ball.vy*=f; }
+        break;
+      }
+    }
+    if(blocks.length===0){ stageClear(); return; }
+    // 落下
+    if(ball.y-ball.r>H+20){ ballLost(); return; }
+  }
+}
+
+function draw(){
+  ctx.fillStyle='#141428'; ctx.fillRect(0,0,W,H);
+  // 危険ライン
+  ctx.strokeStyle='rgba(229,83,75,0.85)'; ctx.lineWidth=2;
+  ctx.setLineDash([10,8]);
+  ctx.beginPath(); ctx.moveTo(0,DANGER_Y); ctx.lineTo(W,DANGER_Y); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle='rgba(229,83,75,0.9)'; ctx.font='12px sans-serif';
+  ctx.fillText('DANGER LINE', 8, DANGER_Y-6);
+
+  // ブロック
+  var warn = spawnCount<MAX_SPAWN && spawnTimer<=30 && scene==='play';
+  for(var i=0;i<blocks.length;i++){
+    var b=blocks[i];
+    ctx.fillStyle=b.color;
+    if(warn && Math.floor(spawnTimer/6)%2===0) ctx.fillStyle='#ffffff';
+    ctx.fillRect(b.x,b.y,b.w,b.h);
+    ctx.fillStyle='rgba(255,255,255,0.18)';
+    ctx.fillRect(b.x,b.y,b.w,5);
+  }
+  if(flashT>0){ ctx.fillStyle='rgba(255,255,255,0.06)'; ctx.fillRect(0,0,W,H); }
+
+  // 接近警告
+  if(scene==='play' && blocks.length && (DANGER_Y-lowestBottom())<76){
+    if(Math.floor(frameCount/10)%2===0){
+      ctx.fillStyle='#e5534b'; ctx.font='bold 22px sans-serif'; ctx.textAlign='center';
+      ctx.fillText('ブロック接近！', W/2, 34);
+      ctx.textAlign='left';
+    }
+  }
+
+  // パドルと玉
+  ctx.fillStyle='#e8e8f0'; ctx.fillRect(paddle.x,paddle.y,paddle.w,paddle.h);
+  ctx.fillStyle='#ffd94a';
+  ctx.beginPath(); ctx.arc(ball.x,ball.y,ball.r,0,Math.PI*2); ctx.fill();
+
+  // 上部ステータス
+  ctx.fillStyle='#eee'; ctx.font='16px sans-serif';
+  ctx.fillText('SCORE '+score, 12, 24);
+  ctx.fillText('STAGE '+stage+'/5', 200, 24);
+  ctx.fillText('玉 ×'+lives, 330, 24);
+  ctx.fillText('HI '+hi, 430, 24);
+  ctx.fillText('出現 あと'+(MAX_SPAWN-spawnCount)+'段', 520, 24);
+  // 出現ゲージ
+  ctx.fillStyle='#888'; ctx.font='12px sans-serif';
+  if(spawnCount<MAX_SPAWN){
+    ctx.fillText('次の出現', 640, 24);
+    ctx.fillStyle='#333'; ctx.fillRect(700,12,180,10);
+    ctx.fillStyle= spawnTimer<=30 ? '#e5534b' : '#3ca7c9';
+    ctx.fillRect(700,12,180*(spawnTimer/spawnInterval),10);
+  } else {
+    ctx.fillText('出現おわり', 700, 24);
+  }
+
+  ctx.textAlign='center';
+  if(scene==='title'){
+    ctx.fillStyle='rgba(10,10,20,0.75)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#ffd94a'; ctx.font='bold 44px sans-serif';
+    ctx.fillText('ブロック・プレッシャー', W/2, 220);
+    ctx.fillStyle='#eee'; ctx.font='18px sans-serif';
+    ctx.fillText('上から新しいブロックが出てきて、', W/2, 280);
+    ctx.fillText('下へ押し出されていく（1面に4段まで）。', W/2, 310);
+    ctx.fillText('赤いラインに届く前に、全部壊しきれ。', W/2, 340);
+    ctx.font='bold 20px sans-serif';
+    ctx.fillText('クリックかスペースでスタート', W/2, 410);
+  }
+  if(scene==='serve'){
+    ctx.fillStyle='#eee'; ctx.font='18px sans-serif';
+    ctx.fillText('クリックかスペースで発射', W/2, H-90);
+  }
+  if(scene==='stageclear'){
+    ctx.fillStyle='#ffd94a'; ctx.font='bold 34px sans-serif';
+    ctx.fillText('STAGE '+stage+' CLEAR!', W/2, 280);
+    ctx.fillStyle='#eee'; ctx.font='18px sans-serif';
+    ctx.fillText('高さボーナス付き。次の面へ…', W/2, 320);
+  }
+  if(scene==='gameover'){
+    ctx.fillStyle='rgba(10,10,20,0.75)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#e5534b'; ctx.font='bold 40px sans-serif';
+    ctx.fillText('GAME OVER', W/2, 250);
+    ctx.fillStyle='#eee'; ctx.font='18px sans-serif';
+    ctx.fillText(overReason, W/2, 295);
+    ctx.fillText('STAGE '+stage+' / SCORE '+score, W/2, 330);
+    ctx.font='bold 20px sans-serif';
+    ctx.fillText('クリックかスペースでもう一度', W/2, 400);
+  }
+  if(scene==='gameclear'){
+    ctx.fillStyle='rgba(10,10,20,0.75)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#ffd94a'; ctx.font='bold 40px sans-serif';
+    ctx.fillText('ALL CLEAR!', W/2, 250);
+    ctx.fillStyle='#eee'; ctx.font='18px sans-serif';
+    ctx.fillText('全5面を壊しきった！ SCORE '+score, W/2, 300);
+    ctx.font='bold 20px sans-serif';
+    ctx.fillText('クリックかスペースでもう一度', W/2, 390);
+  }
+  ctx.textAlign='left';
+}
+
+function frame(){ step(); draw(); requestAnimationFrame(frame); }
+requestAnimationFrame(frame);
+
+// 入力
+function pointerX(clientX){
+  var rect=canvas.getBoundingClientRect();
+  return (clientX-rect.left)*(W/rect.width);
+}
+canvas.addEventListener('mousemove', function(e){ paddle.x=pointerX(e.clientX)-paddle.w/2; });
+canvas.addEventListener('mousedown', function(e){
+  if(scene==='title'||scene==='gameover'||scene==='gameclear') startGame();
+  else launchBall();
+});
+canvas.addEventListener('touchstart', function(e){
+  e.preventDefault();
+  var t=e.touches[0]; paddle.x=pointerX(t.clientX)-paddle.w/2;
+  if(scene==='title'||scene==='gameover'||scene==='gameclear') startGame();
+  else launchBall();
+},{passive:false});
+canvas.addEventListener('touchmove', function(e){
+  e.preventDefault();
+  var t=e.touches[0]; paddle.x=pointerX(t.clientX)-paddle.w/2;
+},{passive:false});
+document.addEventListener('keydown', function(e){
+  keys[e.key]=true;
+  if(e.key===' '){
+    e.preventDefault();
+    if(scene==='title'||scene==='gameover'||scene==='gameclear') startGame();
+    else launchBall();
+  }
+  if(e.key==='ArrowLeft'||e.key==='ArrowRight') e.preventDefault();
+});
+document.addEventListener('keyup', function(e){ keys[e.key]=false; });
+
+// テスト用フック
+window.__BP={
+  state:function(){ return { scene:scene, score:score, lives:lives, stage:stage,
+    blocks:blocks.length, lowest:lowestBottom(), spawnTimer:spawnTimer,
+    spawnInterval:spawnInterval, spawnCount:spawnCount,
+    ball:{x:ball.x,y:ball.y,vx:ball.vx,vy:ball.vy,stuck:ball.stuck},
+    paddle:{x:paddle.x,w:paddle.w} }; },
+  start:startGame,
+  launch:launchBall,
+  tick:function(n){ for(var i=0;i<n;i++){ step(); } },
+  spawnNow:function(){ spawnRow(); },
+  debugLower:function(dy){ for(var i=0;i<blocks.length;i++) blocks[i].y+=dy; },
+  setPaddle:function(x){ paddle.x=x-paddle.w/2; },
+  destroyBlocks:function(keep){ while(blocks.length>keep) blocks.pop(); },
+  setStage:function(n){ stage=n; buildStage(stage); resetBall(); scene='serve'; },
+  dropBall:function(){ ball.y=H+30; ball.vy=1; ball.stuck=false; if(scene==='serve')scene='play'; step(); }
+};
+})();
+</script>
+</body>
+</html>
