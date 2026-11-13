@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>ワープ＆ワープ＆ワープ｜NAWOMIDOUゲーム館</title>
+<style>
+  body { margin:0; background:#0c0c18; color:#eee; font-family:sans-serif; text-align:center; }
+  h1 { font-size:20px; margin:10px 0 4px; }
+  p.howto { font-size:13px; color:#bbb; margin:2px 0 8px; }
+  canvas { background:#101024; display:block; margin:0 auto; max-width:96vw; height:auto; touch-action:none; }
+</style>
+</head>
+<body>
+<h1>ワープ＆ワープ＆ワープ</h1>
+<p class="howto">遊び方：矢印キー／WASDで移動、スペース（Z）で攻撃。中央のワープゾーンが光ったら踏むと、3つの世界のどこかへランダムに飛ぶ。3世界すべての敵を全滅させれば面クリア。</p>
+<canvas id="game" width="900" height="600"></canvas>
+<script>
+(function(){
+"use strict";
+var W=900, H=600;
+var FX=0, FY=40, FW=900, FH=560;              // フィールド
+var canvas=document.getElementById('game');
+var ctx=canvas.getContext('2d');
+
+var WORLD_NAMES={ space:'スペースワールド', maze:'メイズワールド', zero:'無重力ワールド' };
+var WORLD_KEYS=['space','maze','zero'];
+var ENEMY_COLORS=['#ffd94a','#e58a3c','#e5534b'];   // 黄→橙→赤
+
+var hi=0;
+try{ hi=parseInt(localStorage.getItem('tripleWarpHigh')||'0',10)||0; }catch(e){}
+
+var scene='title';
+var score=0, lives=3, round=1;
+var world='space';
+var frameCount=0, clearTimer=0, flashT=0;
+var chainColor=-1, chainCount=0;
+
+var player={ x:450, y:480, r:12, dirx:0, diry:-1, vx:0, vy:0, inv:0 };
+var keys={};
+var actionHeld=false, prevAction=false;
+var pointer={ down:false, x:0, y:0 };
+
+var warp={ active:false, timer:600 };          // 10秒待ち→4秒間有効
+var WARP_WAIT=600, WARP_ON=240;
+
+var worlds=null;
+
+// 迷路：15x10セル（60x56）
+var MC=15, MR=10, CW=60, CH=56;
+function mazeWall(cx,cy){
+  if(cx<0||cy<0||cx>=MC||cy>=MR) return true;
+  if(cx===0||cy===0||cx===MC-1||cy===MR-1) return true;
+  if(cx%2===0 && cy%2===0) return true;        // 柱
+  return false;
+}
+function cellCenter(cx,cy){ return { x:FX+cx*CW+CW/2, y:FY+cy*CH+CH/2 }; }
+function cellOf(x,y){ return { cx:Math.floor((x-FX)/CW), cy:Math.floor((y-FY)/CH) }; }
+
+function rnd(a,b){ return a+Math.random()*(b-a); }
+function dist(x1,y1,x2,y2){ var dx=x2-x1, dy=y2-y1; return Math.sqrt(dx*dx+dy*dy); }
+
+function makeEnemies(n, kind){
+  var arr=[], i, tries;
+  for(i=0;i<n;i++){
+    var e={ r:12, alive:true };
+    if(kind==='space'){
+      e.x=rnd(80,W-80); e.y=rnd(FY+60,FY+300);
+      var ang=rnd(0,Math.PI*2); e.vx=Math.cos(ang)*0.34; e.vy=Math.sin(ang)*0.34;
+      e.colorIdx=Math.floor(rnd(0,3)); e.colorT=Math.floor(rnd(0,300));
+      e.shootT=Math.floor(rnd(380,700));
+    } else if(kind==='maze'){
+      var c=null; tries=0;
+      while(tries++<200){
+        var cx=1+Math.floor(rnd(0,MC-2)), cy=1+Math.floor(rnd(0,MR-2));
+        if(mazeWall(cx,cy)) continue;
+        if(Math.abs(cx-7)+Math.abs(cy-7)<5) continue;   // 自機開始セルから離す
+        c={cx:cx,cy:cy}; break;
+      }
+      if(!c) c={cx:1,cy:1};
+      var p=cellCenter(c.cx,c.cy); e.x=p.x; e.y=p.y;
+      e.dirx=[1,-1,0,0][Math.floor(rnd(0,4))]; e.diry=(e.dirx===0)?(Math.random()<0.5?1:-1):0;
+      e.turnT=Math.floor(rnd(120,300));
+    } else { // zero
+      e.x=rnd(80,W-80); e.y=rnd(FY+60,FY+320);
+      e.vx=rnd(-0.19,0.19); e.vy=rnd(-0.19,0.19);
+    }
+    arr.push(e);
+  }
+  return arr;
+}
+
+function buildRound(n){
+  worlds={
+    space:{ enemies:makeEnemies(5+n,'space'), bullet:null, ebullets:[], bonus:null },
+    maze:{ enemies:makeEnemies(4+n,'maze'), bomb:null, blast:null },
+    zero:{ enemies:makeEnemies(4+n,'zero'), beams:[] }
+  };
+  chainColor=-1; chainCount=0;
+  world='space';
+  warp.active=false; warp.timer=WARP_WAIT;
+  placePlayerAtSpawn();
+}
+
+function placePlayerAtSpawn(){
+  player.vx=0; player.vy=0; player.inv=150;
+  if(world==='maze'){ var p=cellCenter(7,7); player.x=p.x; player.y=p.y; }
+  else { player.x=450; player.y=500; }
+  player.dirx=0; player.diry=-1;
+}
+
+function startGame(){
+  score=0; lives=3; round=1;
+  buildRound(1);
+  scene='play';
+}
+
+function saveHi(){ if(score>hi){ hi=score; try{ localStorage.setItem('tripleWarpHigh', String(hi)); }catch(e){} } }
+
+function totalRemaining(){
+  var t=0;
+  for(var i=0;i<3;i++) t+=worlds[WORLD_KEYS[i]].enemies.length;
+  return t;
+}
+
+function doWarp(){
+  var others=WORLD_KEYS.filter(function(k){ return k!==world; });
+  world=others[Math.floor(Math.random()*others.length)];
+  flashT=14;
+  warp.active=false; warp.timer=WARP_WAIT;
+  placePlayerAtSpawn();
+}
+
+function miss(){
+  lives--;
+  flashT=16;
+  if(lives<=0){ scene='gameover'; saveHi(); }
+  else placePlayerAtSpawn();
+}
+
+function roundClear(){
+  score+=1000; saveHi();
+  scene='roundclear'; clearTimer=150;
+}
+
+function killCheck(){
+  if(scene==='play' && totalRemaining()===0) roundClear();
+}
+
+// ---------- 入力 ----------
+function inputVec(){
+  var mx=0, my=0;
+  if(keys['ArrowLeft']||keys['a']||keys['A']) mx-=1;
+  if(keys['ArrowRight']||keys['d']||keys['D']) mx+=1;
+  if(keys['ArrowUp']||keys['w']||keys['W']) my-=1;
+  if(keys['ArrowDown']||keys['s']||keys['S']) my+=1;
+  if(pointer.down){
+    var dx=pointer.x-player.x, dy=pointer.y-player.y;
+    if(Math.abs(dx)>8||Math.abs(dy)>8){ mx=Math.sign(dx); my=Math.sign(dy); if(Math.abs(dx)<14)mx=0; if(Math.abs(dy)<14)my=0; }
+  }
+  return {x:mx,y:my};
+}
+
+// ---------- スペースワールド ----------
+function fireSpace(){
+  var s=worlds.space;
+  if(s.bullet) return;
+  var dx=player.dirx, dy=player.diry;
+  if(dx===0&&dy===0){ dy=-1; }
+  var len=Math.sqrt(dx*dx+dy*dy);
+  s.bullet={ x:player.x, y:player.y, vx:dx/len*2.9, vy:dy/len*2.9, r:4 };
+}
+function stepSpace(pressed){
+  var s=worlds.space;
+  var v=inputVec();
+  if(v.x!==0||v.y!==0){ player.dirx=v.x; player.diry=v.y; }
+  player.x+=v.x*1.05; player.y+=v.y*1.05;
+  clampPlayerToField();
+  if(pressed) fireSpace();
+
+  // 自機弾
+  if(s.bullet){
+    var b=s.bullet;
+    b.x+=b.vx; b.y+=b.vy;
+    if(b.x<FX||b.x>FX+FW||b.y<FY||b.y>FY+FH) s.bullet=null;
+    else {
+      var hit=false;
+      if(s.bonus && dist(b.x,b.y,s.bonus.x,s.bonus.y)<b.r+13){ score+=500; s.bonus=null; s.bullet=null; hit=true; }
+      if(!hit){
+        for(var i=s.enemies.length-1;i>=0;i--){
+          var e=s.enemies[i];
+          if(dist(b.x,b.y,e.x,e.y)<b.r+e.r){
+            var ci=e.colorIdx;
+            s.enemies.splice(i,1); s.bullet=null; score+=100;
+            if(ci===chainColor) chainCount++; else { chainColor=ci; chainCount=1; }
+            if(chainCount>=3){ chainCount=0; spawnBonus(); }
+            killCheck();
+            break;
+          }
+        }
+      }
+    }
+  }
+  // ボーナス敵
+  if(s.bonus){
+    s.bonus.x+=s.bonus.vx;
+    if(s.bonus.x<-30||s.bonus.x>W+30) s.bonus=null;
+  }
+  // 敵
+  for(var j=s.enemies.length-1;j>=0;j--){
+    var en=s.enemies[j];
+    en.x+=en.vx; en.y+=en.vy;
+    if(en.x<FX+en.r){ en.x=FX+en.r; en.vx=Math.abs(en.vx); }
+    if(en.x>FX+FW-en.r){ en.x=FX+FW-en.r; en.vx=-Math.abs(en.vx); }
+    if(en.y<FY+en.r){ en.y=FY+en.r; en.vy=Math.abs(en.vy); }
+    if(en.y>FY+FH-en.r){ en.y=FY+FH-en.r; en.vy=-Math.abs(en.vy); }
+    en.colorT++;
+    if(en.colorT>=300){ en.colorT=0; en.colorIdx=(en.colorIdx+1)%3; }
+    en.shootT--;
+    if(en.shootT<=0){
+      en.shootT=Math.floor(rnd(430,780));
+      var d=dist(en.x,en.y,player.x,player.y)||1;
+      s.ebullets.push({ x:en.x, y:en.y, vx:(player.x-en.x)/d*1.05, vy:(player.y-en.y)/d*1.05, r:4 });
+    }
+    if(player.inv<=0 && dist(en.x,en.y,player.x,player.y)<en.r+player.r){ miss(); return; }
+  }
+  // 敵弾
+  for(var k=s.ebullets.length-1;k>=0;k--){
+    var eb=s.ebullets[k];
+    eb.x+=eb.vx; eb.y+=eb.vy;
+    if(eb.x<FX||eb.x>FX+FW||eb.y<FY||eb.y>FY+FH){ s.ebullets.splice(k,1); continue; }
+    if(player.inv<=0 && dist(eb.x,eb.y,player.x,player.y)<eb.r+player.r){ s.ebullets.splice(k,1); miss(); return; }
+  }
+}
+function spawnBonus(){
+  var s=worlds.space;
+  if(s.bonus) return;
+  var fromLeft=Math.random()<0.5;
+  s.bonus={ x:fromLeft?-24:W+24, y:rnd(FY+70,FY+FH-120), vx:fromLeft?1.4:-1.4 };
+}
+function clampPlayerToField(){
+  if(player.x<FX+player.r)player.x=FX+player.r;
+  if(player.x>FX+FW-player.r)player.x=FX+FW-player.r;
+  if(player.y<FY+player.r)player.y=FY+player.r;
+  if(player.y>FY+FH-player.r)player.y=FY+FH-player.r;
+}
+
+// ---------- メイズワールド ----------
+var chargeT=0;
+function hitWall(x,y,r){
+  var c0=cellOf(x-r,y-r), c1=cellOf(x+r,y+r);
+  for(var cy=c0.cy;cy<=c1.cy;cy++) for(var cx=c0.cx;cx<=c1.cx;cx++){
+    if(mazeWall(cx,cy)){
+      var wx=FX+cx*CW, wy=FY+cy*CH;
+      if(x+r>wx && x-r<wx+CW && y+r>wy && y-r<wy+CH) return true;
+    }
+  }
+  return false;
+}
+function moveWithWalls(obj,dx,dy){
+  obj.x+=dx;
+  if(hitWall(obj.x,obj.y,obj.r)) obj.x-=dx;
+  obj.y+=dy;
+  if(hitWall(obj.x,obj.y,obj.r)) obj.y-=dy;
+}
+function stepMaze(pressed, released){
+  var m=worlds.maze;
+  var v=inputVec();
+  if(v.x!==0||v.y!==0){ player.dirx=v.x; player.diry=v.y; }
+  moveWithWalls(player, v.x*1.1, v.y*1.1);
+
+  // 爆弾：長押しで導火時間をためる、離して設置
+  if(actionHeld && !m.bomb && !m.blast){ if(chargeT<180) chargeT++; }
+  if(released && !m.bomb && !m.blast){
+    if(chargeT>0){
+      var c=cellOf(player.x,player.y);
+      m.bomb={ cx:c.cx, cy:c.cy, fuse:150+Math.round(chargeT/180*150) };  // 2.5〜5秒（最短でも爆風2マスから逃げ切れる長さ）
+    }
+    chargeT=0;
+  }
+  if(pressed && m.bomb) { /* 設置中は追加不可 */ }
+
+  if(m.bomb){
+    m.bomb.fuse--;
+    if(m.bomb.fuse<=0){
+      var cells=[{cx:m.bomb.cx,cy:m.bomb.cy}];
+      var dirs=[[1,0],[-1,0],[0,1],[0,-1]];
+      for(var d=0;d<4;d++){
+        for(var len=1;len<=2;len++){
+          var nx=m.bomb.cx+dirs[d][0]*len, ny=m.bomb.cy+dirs[d][1]*len;
+          if(mazeWall(nx,ny)) break;
+          cells.push({cx:nx,cy:ny});
+        }
+      }
+      m.blast={ cells:cells, t:26 };
+      m.bomb=null;
+    }
+  }
+  if(m.blast){
+    var kills=0;
+    for(var i=m.enemies.length-1;i>=0;i--){
+      var e=m.enemies[i], ec=cellOf(e.x,e.y);
+      for(var q=0;q<m.blast.cells.length;q++){
+        if(m.blast.cells[q].cx===ec.cx && m.blast.cells[q].cy===ec.cy){ m.enemies.splice(i,1); kills++; break; }
+      }
+    }
+    if(kills>0){ score+=100*kills + (kills>=2 ? 200*(kills-1) : 0); killCheck(); if(scene!=='play')return; }
+    var pc=cellOf(player.x,player.y);
+    for(var q2=0;q2<m.blast.cells.length;q2++){
+      if(m.blast.cells[q2].cx===pc.cx && m.blast.cells[q2].cy===pc.cy && player.inv<=0){ m.blast=null; miss(); return; }
+    }
+    m.blast.t--;
+    if(m.blast.t<=0) m.blast=null;
+  }
+
+  // 敵：通路をさまよう
+  for(var j=m.enemies.length-1;j>=0;j--){
+    var en=m.enemies[j];
+    var ox=en.x, oy=en.y;
+    moveWithWalls(en, en.dirx*0.37, en.diry*0.37);
+    en.turnT--;
+    if((en.x===ox && en.y===oy && (en.dirx!==0||en.diry!==0)) || en.turnT<=0){
+      en.turnT=Math.floor(rnd(120,300));
+      var opts=[[1,0],[-1,0],[0,1],[0,-1]];
+      var o=opts[Math.floor(rnd(0,4))];
+      en.dirx=o[0]; en.diry=o[1];
+    }
+    if(player.inv<=0 && dist(en.x,en.y,player.x,player.y)<en.r+player.r){ miss(); return; }
+  }
+}
+
+// ---------- 無重力ワールド ----------
+var fireCd=0;
+function zeroFire(dx,dy){
+  var z=worlds.zero;
+  var len=Math.sqrt(dx*dx+dy*dy)||1;
+  dx/=len; dy/=len;
+  z.beams.push({ x:player.x, y:player.y, vx:dx*3.8, vy:dy*3.8, r:4, life:110 });
+  player.vx-=dx*0.17; player.vy-=dy*0.17;
+  var sp=Math.sqrt(player.vx*player.vx+player.vy*player.vy);
+  if(sp>1.7){ player.vx*=1.7/sp; player.vy*=1.7/sp; }
+}
+function stepZero(){
+  var z=worlds.zero;
+  if(fireCd>0) fireCd--;
+  // 方向キー＝狙い（発射しない）。スペース／タップで狙った方向へ発射し、反動で逆へ押される。
+  // 進行方向に撃てばブレーキになり、撃ち続けると逆向きに進み始める。
+  var v=inputVec();
+  if(v.x!==0||v.y!==0){ player.dirx=v.x; player.diry=v.y; }
+  if((actionHeld||pointer.down) && fireCd<=0){
+    if(pointer.down){
+      var ang=Math.atan2(pointer.y-player.y, pointer.x-player.x);
+      zeroFire(Math.cos(ang), Math.sin(ang));
+    } else {
+      zeroFire(player.dirx, player.diry);
+    }
+    fireCd=12;
+  }
+  // 慣性移動＋壁で跳ね返る
+  player.x+=player.vx; player.y+=player.vy;
+  if(player.x<FX+player.r){ player.x=FX+player.r; player.vx=Math.abs(player.vx)*0.65; }
+  if(player.x>FX+FW-player.r){ player.x=FX+FW-player.r; player.vx=-Math.abs(player.vx)*0.65; }
+  if(player.y<FY+player.r){ player.y=FY+player.r; player.vy=Math.abs(player.vy)*0.65; }
+  if(player.y>FY+FH-player.r){ player.y=FY+FH-player.r; player.vy=-Math.abs(player.vy)*0.65; }
+
+  for(var i=z.beams.length-1;i>=0;i--){
+    var b=z.beams[i];
+    b.x+=b.vx; b.y+=b.vy; b.life--;
+    if(b.life<=0||b.x<FX||b.x>FX+FW||b.y<FY||b.y>FY+FH){ z.beams.splice(i,1); continue; }
+    for(var j=z.enemies.length-1;j>=0;j--){
+      var e=z.enemies[j];
+      if(dist(b.x,b.y,e.x,e.y)<b.r+e.r){
+        z.enemies.splice(j,1); z.beams.splice(i,1); score+=150; killCheck();
+        break;
+      }
+    }
+    if(scene!=='play') return;
+  }
+  for(var k=z.enemies.length-1;k>=0;k--){
+    var en=z.enemies[k];
+    var d=dist(en.x,en.y,player.x,player.y)||1;
+    en.vx+=(player.x-en.x)/d*0.0025; en.vy+=(player.y-en.y)/d*0.0025;
+    var es=Math.sqrt(en.vx*en.vx+en.vy*en.vy);
+    if(es>0.34){ en.vx*=0.34/es; en.vy*=0.34/es; }
+    en.x+=en.vx; en.y+=en.vy;
+    if(en.x<FX+en.r){ en.x=FX+en.r; en.vx=Math.abs(en.vx); }
+    if(en.x>FX+FW-en.r){ en.x=FX+FW-en.r; en.vx=-Math.abs(en.vx); }
+    if(en.y<FY+en.r){ en.y=FY+en.r; en.vy=Math.abs(en.vy); }
+    if(en.y>FY+FH-en.r){ en.y=FY+FH-en.r; en.vy=-Math.abs(en.vy); }
+    if(player.inv<=0 && dist(en.x,en.y,player.x,player.y)<en.r+player.r){ miss(); return; }
+  }
+}
+
+// ---------- 共通ステップ ----------
+function step(){
+  frameCount++;
+  if(flashT>0) flashT--;
+  if(scene==='roundclear'){
+    clearTimer--;
+    if(clearTimer<=0){ round++; buildRound(round); scene='play'; }
+    prevAction=actionHeld;
+    return;
+  }
+  if(scene!=='play'){ prevAction=actionHeld; return; }
+
+  if(player.inv>0) player.inv--;
+
+  var pressed=actionHeld && !prevAction;
+  var released=!actionHeld && prevAction;
+  prevAction=actionHeld;
+
+  // ワープゾーン
+  if(warp.active){
+    warp.timer--;
+    if(warp.timer<=0){ warp.active=false; warp.timer=WARP_WAIT; }
+  } else {
+    warp.timer--;
+    if(warp.timer<=0){ warp.active=true; warp.timer=WARP_ON; }
+  }
+  var wz={ x:450, y:320 };
+  if(warp.active && dist(player.x,player.y,wz.x,wz.y)<38){
+    doWarp();
+    return;
+  }
+
+  if(world==='space') stepSpace(pressed);
+  else if(world==='maze') stepMaze(pressed, released);
+  else stepZero();
+}
+
+// ---------- 描画 ----------
+function drawWarpZone(){
+  var x=450, y=320;
+  if(warp.active){
+    var blink=Math.floor(frameCount/8)%2===0;
+    ctx.strokeStyle=blink?'#5df2ff':'#2a9db5'; ctx.lineWidth=3;
+    ctx.strokeRect(x-34,y-34,68,68);
+    ctx.fillStyle='#5df2ff'; ctx.font='bold 13px sans-serif'; ctx.textAlign='center';
+    ctx.fillText('WARP', x, y+5);
+    ctx.textAlign='left';
+  } else {
+    ctx.strokeStyle='rgba(93,242,255,0.25)'; ctx.lineWidth=2;
+    ctx.strokeRect(x-34,y-34,68,68);
+  }
+}
+function drawPlayer(){
+  if(player.inv>0 && Math.floor(frameCount/6)%2===0) return;  // 無敵中は点滅
+  ctx.fillStyle='#e8e8f0';
+  ctx.beginPath(); ctx.arc(player.x,player.y,player.r,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#3ca7c9';
+  ctx.beginPath(); ctx.arc(player.x+player.dirx*5, player.y+player.diry*5, 5, 0, Math.PI*2); ctx.fill();
+}
+function drawEnemyBase(e,color){
+  ctx.fillStyle=color;
+  ctx.beginPath(); ctx.arc(e.x,e.y,e.r,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#141428';
+  ctx.fillRect(e.x-6,e.y-2,4,4); ctx.fillRect(e.x+2,e.y-2,4,4);
+  ctx.fillStyle='#ff7ab0'; ctx.fillRect(e.x-3,e.y+4,6,4);   // 舌
+}
+function draw(){
+  ctx.fillStyle= world==='zero' ? '#0a0a20' : (world==='maze' ? '#12140f' : '#101024');
+  ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle='#35507a'; ctx.lineWidth=2; ctx.strokeRect(FX,FY,FW,FH);
+
+  if(world==='space'){
+    ctx.fillStyle='#2c3e70';
+    for(var sx=0;sx<26;sx++) for(var sy=0;sy<8;sy++){ if((sx*7+sy*13)%5===0) ctx.fillRect(20+sx*34, FY+24+sy*66, 2, 2); }
+    var s=worlds.space;
+    drawWarpZone();
+    for(var i=0;i<s.enemies.length;i++) drawEnemyBase(s.enemies[i], ENEMY_COLORS[s.enemies[i].colorIdx]);
+    if(s.bonus){ ctx.fillStyle='#5df2ff'; ctx.beginPath(); ctx.arc(s.bonus.x,s.bonus.y,13,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#0a0a20'; ctx.font='bold 14px sans-serif'; ctx.textAlign='center'; ctx.fillText('?', s.bonus.x, s.bonus.y+5); ctx.textAlign='left'; }
+    if(s.bullet){ ctx.fillStyle='#ffd94a'; ctx.beginPath(); ctx.arc(s.bullet.x,s.bullet.y,s.bullet.r,0,Math.PI*2); ctx.fill(); }
+    ctx.fillStyle='#ff9a9a';
+    for(var k=0;k<s.ebullets.length;k++){ ctx.beginPath(); ctx.arc(s.ebullets[k].x,s.ebullets[k].y,s.ebullets[k].r,0,Math.PI*2); ctx.fill(); }
+    drawPlayer();
+  }
+  if(world==='maze'){
+    var m=worlds.maze;
+    for(var cy=0;cy<MR;cy++) for(var cx=0;cx<MC;cx++){
+      if(mazeWall(cx,cy)){ ctx.fillStyle='#3f5a36'; ctx.fillRect(FX+cx*CW+1,FY+cy*CH+1,CW-2,CH-2); }
+    }
+    drawWarpZone();
+    if(m.bomb){
+      var bc=cellCenter(m.bomb.cx,m.bomb.cy);
+      ctx.fillStyle='#222'; ctx.beginPath(); ctx.arc(bc.x,bc.y,14,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle= m.bomb.fuse<40 ? '#e5534b' : '#ffd94a'; ctx.font='bold 13px sans-serif'; ctx.textAlign='center';
+      ctx.fillText(String(Math.ceil(m.bomb.fuse/60)), bc.x, bc.y+5); ctx.textAlign='left';
+    }
+    if(m.blast){
+      ctx.fillStyle='rgba(255,140,40,0.75)';
+      for(var q=0;q<m.blast.cells.length;q++){ var cc=m.blast.cells[q]; ctx.fillRect(FX+cc.cx*CW+2,FY+cc.cy*CH+2,CW-4,CH-4); }
+    }
+    for(var j=0;j<m.enemies.length;j++) drawEnemyBase(m.enemies[j], '#b48ce5');
+    drawPlayer();
+    if(actionHeld && chargeT>0){
+      ctx.fillStyle='#333'; ctx.fillRect(player.x-26, player.y-30, 52, 7);
+      ctx.fillStyle='#ffd94a'; ctx.fillRect(player.x-26, player.y-30, 52*(chargeT/180), 7);
+      ctx.fillStyle='#eee'; ctx.font='11px sans-serif'; ctx.textAlign='center';
+      ctx.fillText('導火 '+(2.5+chargeT/180*2.5).toFixed(1)+'秒', player.x, player.y-36); ctx.textAlign='left';
+    }
+  }
+  if(world==='zero'){
+    var z=worlds.zero;
+    ctx.fillStyle='#23305e';
+    for(var zx=0;zx<30;zx++) for(var zy=0;zy<10;zy++){ if((zx*3+zy*7)%4===0) ctx.fillRect(14+zx*30, FY+18+zy*54, 2, 2); }
+    drawWarpZone();
+    for(var a=0;a<z.enemies.length;a++) drawEnemyBase(z.enemies[a], '#7ad9a0');
+    ctx.fillStyle='#9af2ff';
+    for(var b=0;b<z.beams.length;b++){ ctx.beginPath(); ctx.arc(z.beams[b].x,z.beams[b].y,z.beams[b].r,0,Math.PI*2); ctx.fill(); }
+    drawPlayer();
+    if(Math.abs(player.vx)+Math.abs(player.vy)>0.05){
+      ctx.strokeStyle='rgba(154,242,255,0.5)'; ctx.beginPath();
+      ctx.moveTo(player.x,player.y);
+      ctx.lineTo(player.x-player.vx*14, player.y-player.vy*14);
+      ctx.stroke();
+    }
+  }
+
+  if(flashT>0){ ctx.fillStyle='rgba(255,255,255,0.25)'; ctx.fillRect(0,0,W,H); }
+
+  // HUD
+  ctx.fillStyle='#eee'; ctx.font='16px sans-serif';
+  ctx.fillText('SCORE '+score, 12, 24);
+  ctx.fillText('ROUND '+round, 190, 24);
+  ctx.fillText('残機 ×'+lives, 300, 24);
+  ctx.fillText('HI '+hi, 400, 24);
+  ctx.font='13px sans-serif';
+  var labels={ space:'スペース '+worlds.space.enemies.length, maze:'メイズ '+worlds.maze.enemies.length, zero:'無重力 '+worlds.zero.enemies.length };
+  var lx=520;
+  for(var wi=0;wi<3;wi++){
+    var key=WORLD_KEYS[wi];
+    ctx.fillStyle= key===world ? '#ffd94a' : '#888';
+    ctx.fillText(labels[key], lx, 24); lx+=110;
+  }
+  ctx.fillStyle= warp.active ? '#5df2ff' : '#666'; ctx.font='12px sans-serif';
+  ctx.fillText(warp.active ? 'ワープゾーン作動中！' : 'ワープまで '+Math.ceil(warp.timer/60)+'秒', 800, 24);
+
+  ctx.fillStyle='#9db8dd'; ctx.font='14px sans-serif'; ctx.textAlign='center';
+  ctx.fillText('― '+WORLD_NAMES[world]+' ―', W/2, FY+FH-8);
+  ctx.textAlign='left';
+
+  ctx.textAlign='center';
+  if(scene==='title'){
+    ctx.fillStyle='rgba(8,8,18,0.8)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#5df2ff'; ctx.font='bold 46px sans-serif';
+    ctx.fillText('ワープ＆ワープ＆ワープ', W/2, 190);
+    ctx.fillStyle='#eee'; ctx.font='17px sans-serif';
+    ctx.fillText('3つの世界を、ランダムにワープしながら戦う。', W/2, 248);
+    ctx.font='15px sans-serif';
+    ctx.fillText('スペースワールド：銃で撃つ。同じ色を3連続で倒すとボーナス敵', W/2, 292);
+    ctx.fillText('メイズワールド：時限爆弾。長押しで導火時間をためて、離して設置', W/2, 322);
+    ctx.fillText('無重力ワールド：方向キーで狙い、スペースで発射。反動で進み、進行方向に撃つとブレーキ', W/2, 352);
+    ctx.fillText('3世界すべての敵を全滅させれば面クリア。', W/2, 392);
+    ctx.font='bold 20px sans-serif'; ctx.fillStyle='#ffd94a';
+    ctx.fillText('クリックかスペースでスタート', W/2, 452);
+  }
+  if(scene==='roundclear'){
+    ctx.fillStyle='#ffd94a'; ctx.font='bold 34px sans-serif';
+    ctx.fillText('ROUND '+round+' CLEAR!', W/2, 300);
+    ctx.fillStyle='#eee'; ctx.font='17px sans-serif';
+    ctx.fillText('クリアボーナス1000点。次の面へ…', W/2, 336);
+  }
+  if(scene==='gameover'){
+    ctx.fillStyle='rgba(8,8,18,0.8)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#e5534b'; ctx.font='bold 40px sans-serif';
+    ctx.fillText('GAME OVER', W/2, 260);
+    ctx.fillStyle='#eee'; ctx.font='18px sans-serif';
+    ctx.fillText('ROUND '+round+' / SCORE '+score, W/2, 305);
+    ctx.font='bold 20px sans-serif';
+    ctx.fillText('クリックかスペースでもう一度', W/2, 380);
+  }
+  ctx.textAlign='left';
+}
+
+function frame(){ step(); draw(); requestAnimationFrame(frame); }
+buildRound(1);
+requestAnimationFrame(frame);
+
+// ---------- 入力 ----------
+function pointerPos(e){
+  var rect=canvas.getBoundingClientRect();
+  return { x:(e.clientX-rect.left)*(W/rect.width), y:(e.clientY-rect.top)*(H/rect.height) };
+}
+canvas.addEventListener('pointerdown', function(e){
+  var p=pointerPos(e); pointer.down=true; pointer.x=p.x; pointer.y=p.y;
+  if(scene==='title'||scene==='gameover') startGame();
+  else actionHeld=true;
+});
+canvas.addEventListener('pointermove', function(e){
+  var p=pointerPos(e); pointer.x=p.x; pointer.y=p.y;
+});
+window.addEventListener('pointerup', function(){ pointer.down=false; actionHeld=false; });
+document.addEventListener('keydown', function(e){
+  keys[e.key]=true;
+  if(e.key===' '||e.key==='z'||e.key==='Z'){
+    if(scene==='title'||scene==='gameover'){ if(e.key===' ') startGame(); }
+    else actionHeld=true;
+    if(e.key===' ') e.preventDefault();
+  }
+  if(e.key.indexOf('Arrow')===0) e.preventDefault();
+});
+document.addEventListener('keyup', function(e){
+  keys[e.key]=false;
+  if(e.key===' '||e.key==='z'||e.key==='Z') actionHeld=false;
+});
+
+// ---------- テスト用フック ----------
+window.__TW={
+  state:function(){ return { scene:scene, world:world, score:score, lives:lives, round:round,
+    remaining:{ space:worlds.space.enemies.length, maze:worlds.maze.enemies.length, zero:worlds.zero.enemies.length },
+    total:totalRemaining(), warpActive:warp.active,
+    player:{ x:player.x, y:player.y, vx:player.vx, vy:player.vy, inv:player.inv },
+    bomb: worlds.maze.bomb ? { fuse:worlds.maze.bomb.fuse } : null,
+    bullet: !!worlds.space.bullet, beams:worlds.zero.beams.length, chargeT:chargeT }; },
+  start:startGame,
+  tick:function(n){ for(var i=0;i<n;i++) step(); },
+  key:function(name,on){ keys[name]=on; },
+  action:function(down){ actionHeld=down; },
+  setWorld:function(w){ world=w; placePlayerAtSpawn(); },
+  warpNow:function(){ doWarp(); },
+  setPlayer:function(x,y){ player.x=x; player.y=y; },
+  setVel:function(vx,vy){ player.vx=vx; player.vy=vy; },
+  enemyAt:function(x,y){
+    var e;
+    if(world==='space'){ e={ x:x,y:y,r:12,vx:0,vy:0,colorIdx:0,colorT:0,shootT:99999 }; worlds.space.enemies.push(e); }
+    else if(world==='maze'){ e={ x:x,y:y,r:12,dirx:0,diry:0,turnT:99999 }; worlds.maze.enemies.push(e); }
+    else { e={ x:x,y:y,r:12,vx:0,vy:0 }; worlds.zero.enemies.push(e); }
+  },
+  clearWorld:function(w){ worlds[w].enemies.length=0; killCheck(); },
+  forceMiss:function(){ player.inv=0; miss(); }
+};
+})();
+</script>
+</body>
+</html>
