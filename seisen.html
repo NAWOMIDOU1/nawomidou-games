@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>シィカとエルミリアの聖戦</title>
+<style>
+  body { margin:0; background:#101408; color:#eef3e0; font-family:"Hiragino Maru Gothic ProN","Hiragino Sans",sans-serif; text-align:center; }
+  h1 { font-size:20px; margin:10px 0 2px; color:#cfe8a8; letter-spacing:2px; }
+  p.howto { font-size:13px; color:#b9c69b; margin:2px 0 8px; }
+  canvas { background:#5d8a3c; border:2px solid #4a6a2a; border-radius:8px; max-width:96vw; height:auto; touch-action:none; }
+</style>
+</head>
+<body>
+<h1>シィカとエルミリアの聖戦</h1>
+<p class="howto">移動：矢印キー／WASD（ドラッグでも可）　剣：スペース／Z（右下のボタンでも可）｜全5面（草原・岩場・鉄橋・城・王座）。普段のシィカは弱い。デイツのいる陰に入るとハートタイム（3秒・無敵・動けない）→覚醒。最後はボスを倒して姫を救え</p>
+<canvas id="cv" width="900" height="600"></canvas>
+<script>
+"use strict";
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const W = 900, H = 600, FY = 40;
+
+const keys = {};
+let ptr = { on: false, x: 0, y: 0 };
+function ptrPos(e) {
+  const r = cv.getBoundingClientRect();
+  const sx = W / r.width, sy = H / r.height;
+  return { x: (e.clientX - r.left) * sx, y: (e.clientY - r.top) * sy };
+}
+cv.addEventListener("pointerdown", e => {
+  const p = ptrPos(e);
+  if (Math.hypot(p.x - 830, p.y - 540) < 52) { tryAttack(); return; }
+  ptr.on = true; ptr.x = p.x; ptr.y = p.y;
+});
+cv.addEventListener("pointermove", e => { if (ptr.on) { const p = ptrPos(e); ptr.x = p.x; ptr.y = p.y; } });
+addEventListener("pointerup", () => { ptr.on = false; });
+addEventListener("keydown", e => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key === " " || e.key.toLowerCase() === "z") tryAttack();
+  if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key)) e.preventDefault();
+});
+addEventListener("keyup", e => { keys[e.key.toLowerCase()] = false; });
+
+function rnd(a, b) { return a + Math.random() * (b - a); }
+function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
+
+const STAGES = [
+  { name: "草原", len: 2400, theme: 0 },
+  { name: "岩場", len: 2600, theme: 1 },
+  { name: "鉄橋", len: 2400, theme: 2 },
+  { name: "城",   len: 2600, theme: 3 },
+  { name: "王座", len: 1700, theme: 4 },
+];
+const DECK = { top: 196, bottom: 424 }; // 鉄橋の足場
+
+let scene = "title"; // title | play | stageclear | gameover | clear
+let time = 0, score = 0, hi = +(localStorage.getItem("seisenHigh") || 0);
+let stage = 1, scrollX = 0, stageLen = STAGES[0].len, scrollSpd = 0.55;
+let bannerT = 0, frame = 0;
+
+let P;
+let enemies, waves, trees, parts, bolts;
+let goal, boss;
+let nextTreeAt, spawnT;
+let heartT = 0, heartTree = null;
+let bossTreeT = 0;
+
+function theme() { return STAGES[stage - 1].theme; }
+function stageName() { return STAGES[stage - 1].name; }
+
+function resetPlayer() {
+  P = { x: 180, y: 330, ang: 0, hp: 4, inv: 0, swingT: 0, cool: 0, powered: false, gauge: 0, inShade: false };
+}
+function setupStage() {
+  stageLen = STAGES[stage - 1].len;
+  scrollSpd = 0.55 + (stage - 1) * 0.04;
+  scrollX = 0; enemies = []; waves = []; trees = []; parts = []; bolts = [];
+  goal = { worldX: 0, active: false, x: -200, y: 320 };
+  boss = null; bossTreeT = 0;
+  nextTreeAt = 480; spawnT = 90;
+  heartT = 0; heartTree = null;
+  P.hp = 4; P.inv = 60; P.x = 180; P.y = 330; P.powered = false; P.gauge = 0;
+  bannerT = 150;
+}
+resetPlayer();
+setupStage(); scene = "title";
+
+function startGame() {
+  score = 0; stage = 1;
+  resetPlayer(); setupStage(); scene = "play";
+}
+
+function tryAttack() {
+  if (scene === "title") { startGame(); return; }
+  if (scene === "gameover" || scene === "clear") { if (bannerT <= 0) startGame(); return; }
+  if (scene !== "play" || P.cool > 0 || heartT > 0) return;
+  P.cool = P.powered ? 16 : 26;
+  P.swingT = 9;
+  const range = P.powered ? 80 : 56, dmg = P.powered ? 3 : 1;
+  const fx = Math.cos(P.ang), fy = Math.sin(P.ang);
+  for (const e of enemies) {
+    const dx = e.x - P.x, dy = e.y - P.y, d = Math.hypot(dx, dy);
+    if (d < range + 14 && (d < 20 || (dx * fx + dy * fy) / (d || 1) > 0.3)) {
+      e.hp -= dmg; e.x += fx * 13; e.y += fy * 13; e.flash = 6;
+      parts.push({ x: e.x, y: e.y, vx: rnd(-0.4, 0.4), vy: rnd(-1, -0.3), t: 0, life: 22, kind: "spark" });
+    }
+  }
+  if (boss) {
+    const dx = boss.x - P.x, dy = boss.y - P.y, d = Math.hypot(dx, dy);
+    if (d < range + 42 && (dx * fx + dy * fy) / (d || 1) > 0.2) {
+      boss.hp -= dmg; boss.flash = 6;
+      parts.push({ x: boss.x - 20, y: boss.y, vx: rnd(-0.4, 0.4), vy: rnd(-1, -0.3), t: 0, life: 22, kind: "spark" });
+    }
+  }
+  if (P.powered) waves.push({ x: P.x + fx * 26, y: P.y + fy * 26, vx: fx * 3.4, vy: fy * 3.4, dmg: 2, life: 42 });
+}
+
+function spawnEnemy() {
+  const th = theme();
+  const y = th === 2 ? rnd(DECK.top + 24, DECK.bottom - 24) : rnd(110, 540);
+  const r = Math.random();
+  if (r < 0.5) enemies.push({ kind: "slime", x: 935, y, hp: 2 + (stage >= 3 ? 1 : 0), spd: 0.32, sc: 100, t: rnd(0, 60), flash: 0 });
+  else if (r < 0.8) enemies.push({ kind: "bat", x: 935, y: th === 2 ? y : rnd(110, 500), hp: 1, spd: 0.5, sc: 150, t: rnd(0, 60), flash: 0 });
+  else enemies.push({ kind: "knight", x: 935, y, hp: 5 + (stage - 1), spd: 0.22, sc: 300, t: rnd(0, 60), flash: 0 });
+}
+
+function damagePlayer() {
+  if (P.inv > 0 || heartT > 0) return;
+  P.hp--; P.inv = 75;
+  parts.push({ x: P.x, y: P.y - 22, vx: 0, vy: -0.8, t: 0, life: 30, kind: "break" });
+  if (P.hp <= 0) {
+    scene = "gameover"; bannerT = 90;
+    if (score > hi) { hi = score; localStorage.setItem("seisenHigh", hi); }
+  }
+}
+
+function killEnemy(e) {
+  score += e.sc;
+  if (P.powered) P.gauge = Math.min(100, P.gauge + 5);
+  for (let i = 0; i < 6; i++) parts.push({ x: e.x, y: e.y, vx: rnd(-1, 1), vy: rnd(-1.2, 0.2), t: 0, life: 26, kind: "spark" });
+}
+
+function shadeOf(t) { return { x: t.worldX - scrollX, y: t.worldY }; }
+function currentShade() {
+  for (const t of trees) {
+    const s = shadeOf(t);
+    if (s.x > -120 && s.x < W + 120) return { x: s.x, y: s.y, tree: t };
+  }
+  return null;
+}
+function addTree(worldX) {
+  const th = theme();
+  trees.push({ worldX, worldY: th === 2 ? rnd(DECK.top + 44, DECK.bottom - 44) : rnd(170, 500), used: false });
+}
+
+function spawnBoss() {
+  boss = { x: 780, y: 320, hp: 30, maxhp: 30, t: 0, mode: "hover", modeT: 0, flash: 0, vx: 0, vy: 0 };
+  addTree(scrollX + 430);
+  parts.push({ x: 450, y: 200, vx: 0, vy: -0.4, t: 0, life: 70, kind: "bossin" });
+}
+
+function killBoss() {
+  score += 2000;
+  for (let i = 0; i < 22; i++) parts.push({ x: boss.x, y: boss.y, vx: rnd(-1.8, 1.8), vy: rnd(-1.8, 1), t: 0, life: 44, kind: "spark" });
+  boss = null;
+  goal.worldX = scrollX + 700; goal.y = 320; goal.active = true;
+}
+
+function tick() {
+  time++;
+  if (scene === "stageclear") {
+    if (bannerT > 0) bannerT--;
+    if (bannerT <= 0) { stage++; setupStage(); scene = "play"; }
+    return;
+  }
+  if (scene !== "play") { if (bannerT > 0) bannerT--; return; }
+  frame++;
+
+  const bossFight = !!boss;
+  if (!bossFight) scrollX += scrollSpd;
+  if (bannerT > 0) bannerT--;
+
+  // 面クリア判定（通常面は距離、最終面はボス出現）
+  if (stage < 5 && scrollX >= stageLen) {
+    score += 500;
+    scene = "stageclear"; bannerT = 150;
+    if (score > hi) { hi = score; localStorage.setItem("seisenHigh", hi); }
+    return;
+  }
+  if (stage === 5 && !boss && !goal.active && scrollX >= stageLen) spawnBoss();
+
+  // 木とデイツの出現
+  if (!bossFight && scrollX >= nextTreeAt && scrollX < stageLen - 300) {
+    addTree(scrollX + 960);
+    nextTreeAt += rnd(680, 880);
+  }
+  if (bossFight) {
+    bossTreeT++;
+    const hasUnused = trees.some(t => !t.used && (t.worldX - scrollX) > -120);
+    if (!hasUnused && bossTreeT > 1300) { addTree(scrollX + 430); bossTreeT = 0; }
+  }
+  trees = trees.filter(t => t.worldX - scrollX > -170);
+
+  // 木陰判定
+  const sh = currentShade();
+  P.inShade = !!(sh && Math.hypot(P.x - sh.x, P.y - sh.y) < 82);
+
+  if (heartT > 0) {
+    heartT--;
+    if (heartTree) { const s = shadeOf(heartTree); P.x = s.x - 14; P.y = s.y + 6; }
+    if (frame % 2 === 0) {
+      const a = rnd(0, Math.PI * 2), v = rnd(0.6, 1.8);
+      parts.push({ x: P.x + 12, y: P.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 0.4, t: 0, life: rnd(30, 55), kind: "heart" });
+    }
+    if (heartT === 0) {
+      P.powered = true; P.gauge = 100;
+      if (heartTree) heartTree.used = true;
+      heartTree = null;
+      for (let i = 0; i < 14; i++) {
+        const a = (i / 14) * Math.PI * 2;
+        parts.push({ x: P.x + 12, y: P.y, vx: Math.cos(a) * 1.7, vy: Math.sin(a) * 1.7, t: 0, life: 40, kind: "heart" });
+      }
+      parts.push({ x: P.x + 12, y: P.y - 30, vx: 0, vy: -0.7, t: 0, life: 46, kind: "awake" });
+    }
+  } else {
+    if (P.inShade && sh && !sh.tree.used) { heartT = 180; heartTree = sh.tree; }
+
+    let mx = 0, my = 0;
+    if (keys["arrowleft"] || keys["a"]) mx -= 1;
+    if (keys["arrowright"] || keys["d"]) mx += 1;
+    if (keys["arrowup"] || keys["w"]) my -= 1;
+    if (keys["arrowdown"] || keys["s"]) my += 1;
+    if (ptr.on) {
+      const dx = ptr.x - P.x, dy = ptr.y - P.y, d = Math.hypot(dx, dy);
+      if (d > 8) { mx = dx / d; my = dy / d; }
+    }
+    const spd = 1.55;
+    P.x = clamp(P.x + mx * spd, 32, W - 32);
+    if (theme() === 2 && !bossFight) P.y = clamp(P.y + my * spd, DECK.top + 16, DECK.bottom - 16);
+    else P.y = clamp(P.y + my * spd, FY + 30, 566);
+    if (mx !== 0 || my !== 0) P.ang = Math.atan2(my, mx);
+  }
+  if (P.inv > 0) P.inv--;
+  if (P.cool > 0) P.cool--;
+  if (P.swingT > 0) P.swingT--;
+
+  // ゲージ
+  if (P.powered) {
+    if (!P.inShade) P.gauge -= 0.12;
+    if (P.gauge <= 0) { P.gauge = 0; P.powered = false; }
+  }
+
+  // 敵
+  if (!bossFight) {
+    spawnT--;
+    if (spawnT <= 0 && scrollX < stageLen - 60) { spawnEnemy(); spawnT = Math.max(66, 118 - stage * 6) + rnd(-16, 16); }
+  }
+  for (const e of enemies) {
+    e.t++;
+    e.x -= (bossFight ? 0 : scrollSpd) + e.spd;
+    if (e.kind === "bat") {
+      e.y += Math.sin(e.t / 16) * 0.7 + clamp(P.y - e.y, -0.22, 0.22);
+    } else {
+      e.y += clamp(P.y - e.y, -0.16, 0.16) * (e.kind === "knight" ? 0.5 : 0.3);
+    }
+    if (e.flash > 0) e.flash--;
+    if (Math.abs(e.x - P.x) < 30 && Math.abs(e.y - P.y) < 34) damagePlayer();
+  }
+  enemies = enemies.filter(e => e.x > -60);
+  for (let i = enemies.length - 1; i >= 0; i--) if (enemies[i].hp <= 0) { killEnemy(enemies[i]); enemies.splice(i, 1); }
+
+  // ボス
+  if (boss) {
+    const b = boss;
+    b.t++; b.modeT++;
+    if (b.flash > 0) b.flash--;
+    if (b.mode === "hover") {
+      b.y += clamp(P.y - b.y, -0.5, 0.5) + Math.sin(b.t / 30) * 0.4;
+      b.x += clamp(720 - b.x, -0.6, 0.6);
+      if (b.modeT % 150 === 0) {
+        const base = Math.atan2(P.y - b.y, P.x - b.x);
+        for (const da of [-0.32, 0, 0.32]) bolts.push({ x: b.x - 20, y: b.y, vx: Math.cos(base + da) * 1.7, vy: Math.sin(base + da) * 1.7 });
+      }
+      if (b.modeT > 330) { b.mode = "tele"; b.modeT = 0; }
+    } else if (b.mode === "tele") {
+      if (b.modeT > 34) { b.mode = "charge"; b.modeT = 0; b.vy = clamp(P.y - b.y, -1.4, 1.4); }
+    } else if (b.mode === "charge") {
+      b.x -= 3.1; b.y += b.vy * 0.4;
+      if (b.x < 130 || b.modeT > 90) { b.mode = "back"; b.modeT = 0; }
+    } else if (b.mode === "back") {
+      b.x += 1.7; b.y += clamp(320 - b.y, -0.8, 0.8);
+      if (b.x >= 715) { b.mode = "hover"; b.modeT = 0; }
+    }
+    b.y = clamp(b.y, 110, 540);
+    if (Math.abs(b.x - P.x) < 54 && Math.abs(b.y - P.y) < 56) damagePlayer();
+    if (b.hp <= 0) killBoss();
+  }
+  // ボスの弾
+  for (const bo of bolts) {
+    bo.x += bo.vx; bo.y += bo.vy;
+    if (Math.hypot(bo.x - P.x, bo.y - P.y) < 24) { damagePlayer(); bo.x = -999; }
+  }
+  bolts = bolts.filter(bo => bo.x > -40 && bo.x < W + 40 && bo.y > 30 && bo.y < H + 30);
+
+  // 剣の衝撃波
+  for (const w of waves) {
+    w.x += w.vx; w.y += w.vy; w.life--;
+    for (const e of enemies) {
+      if (Math.abs(e.x - w.x) < 26 && Math.abs(e.y - w.y) < 30 && e.hp > 0) { e.hp -= w.dmg; e.flash = 6; w.life = 0; }
+    }
+    if (boss && Math.abs(boss.x - w.x) < 46 && Math.abs(boss.y - w.y) < 48 && w.life > 0) { boss.hp -= w.dmg; boss.flash = 6; w.life = 0; }
+  }
+  waves = waves.filter(w => w.life > 0 && w.x > -30 && w.x < W + 30 && w.y > 30 && w.y < H + 30);
+  for (let i = enemies.length - 1; i >= 0; i--) if (enemies[i].hp <= 0) { killEnemy(enemies[i]); enemies.splice(i, 1); }
+  if (boss && boss.hp <= 0) killBoss();
+
+  // ゴール（ボス撃破後のエルミリア）
+  if (goal.active) {
+    goal.x = goal.worldX - scrollX;
+    if (Math.abs(P.x - goal.x) < 46 && Math.abs(P.y - goal.y) < 52) {
+      score += 3000;
+      scene = "clear"; bannerT = 110;
+      if (score > hi) { hi = score; localStorage.setItem("seisenHigh", hi); }
+    }
+  }
+
+  for (const p of parts) { p.t++; p.x += p.vx; p.y += p.vy; }
+  parts = parts.filter(p => p.t < p.life);
+}
+
+function heartPath(x, y, s) {
+  ctx.beginPath();
+  ctx.moveTo(x, y + s * 0.85);
+  ctx.bezierCurveTo(x - s * 1.25, y - s * 0.1, x - s * 0.72, y - s * 1.15, x, y - s * 0.32);
+  ctx.bezierCurveTo(x + s * 0.72, y - s * 1.15, x + s * 1.25, y - s * 0.1, x, y + s * 0.85);
+  ctx.closePath();
+}
+
+function drawShiika(x, y, powered, ang, swingT, inv) {
+  ctx.save(); ctx.translate(x, y);
+  if (inv > 0 && (time >> 2) % 2 === 0) ctx.globalAlpha = 0.35;
+  ctx.fillStyle = "rgba(0,0,0,.22)"; ctx.beginPath(); ctx.ellipse(2, 14, 15, 6, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = powered ? "#e8eefc" : "#7fae5a";
+  ctx.beginPath(); ctx.ellipse(0, 5, 13, 11, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = "#7a4a21"; ctx.beginPath(); ctx.arc(0, -2, 11.5, 0, 7); ctx.fill();
+  const fx = Math.cos(ang), fy = Math.sin(ang);
+  ctx.fillStyle = "#ffd9b8"; ctx.beginPath(); ctx.arc(fx * 4.5, -2 + fy * 4.5, 7.2, 0, 7); ctx.fill();
+  ctx.fillStyle = "#3a2410"; ctx.fillRect(fx * 7 - 1.2, -3.4 + fy * 6, 2.4, 3);
+  ctx.fillStyle = "#7a4a21"; ctx.beginPath(); ctx.arc(-fx * 12, -2 - fy * 12, 5.4, 0, 7); ctx.fill();
+  ctx.fillStyle = "#3a6ad8"; ctx.beginPath(); ctx.arc(-fx * 8.6, -2 - fy * 8.6, 3, 0, 7); ctx.fill();
+  const sw = swingT > 0 ? (-1.15 + (9 - swingT) * 0.26) : 0.55;
+  const ka = ang + sw;
+  ctx.strokeStyle = "#d9dee6"; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(Math.cos(ka) * 9, Math.sin(ka) * 9 - 1); ctx.lineTo(Math.cos(ka) * (powered ? 36 : 28), Math.sin(ka) * (powered ? 36 : 28) - 1); ctx.stroke();
+  ctx.strokeStyle = "#c9a227"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(Math.cos(ka) * 6, Math.sin(ka) * 6 - 1); ctx.lineTo(Math.cos(ka) * 11, Math.sin(ka) * 11 - 1); ctx.stroke();
+  if (powered && swingT > 0) {
+    ctx.strokeStyle = "rgba(255,215,120,.7)"; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.arc(0, 0, 44, ang - 1.15, ang + 1.15); ctx.stroke();
+  }
+  if (powered) { ctx.fillStyle = "rgba(255,190,60,.3)"; ctx.beginPath(); ctx.arc(0, 0, 26, 0, 7); ctx.fill(); }
+  ctx.restore();
+}
+
+function drawDeitsu(x, y) {
+  ctx.save(); ctx.translate(x, y);
+  ctx.fillStyle = "rgba(0,0,0,.22)"; ctx.beginPath(); ctx.ellipse(2, 13, 14, 5.5, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = "#181820"; ctx.beginPath(); ctx.ellipse(0, 4, 13, 11, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = "#23232e"; ctx.beginPath(); ctx.arc(0, -2, 10.5, 0, 7); ctx.fill();
+  ctx.fillStyle = "#c33"; ctx.fillRect(-5.5, -2.6, 11, 2.4);
+  ctx.restore();
+}
+
+function drawElmiria(x, y) {
+  ctx.save(); ctx.translate(x, y);
+  ctx.fillStyle = "#4c4c55";
+  for (let i = 0; i < 10; i++) {
+    const a = (i / 10) * Math.PI * 2;
+    ctx.beginPath(); ctx.arc(Math.cos(a) * 44, Math.sin(a) * 44, 4, 0, 7); ctx.fill();
+  }
+  ctx.strokeStyle = "rgba(70,70,80,.65)"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(0, 0, 44, 0, 7); ctx.stroke();
+  ctx.fillStyle = "#f4f1e6"; ctx.beginPath(); ctx.ellipse(0, 5, 12, 10, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = "#f2c93c"; ctx.beginPath(); ctx.arc(0, -2, 11, 0, 7); ctx.fill();
+  ctx.fillStyle = "#ffe3c2"; ctx.beginPath(); ctx.arc(2, 0, 6.8, 0, 7); ctx.fill();
+  ctx.restore();
+}
+
+function drawShadeObject(sx, sy) {
+  const th = theme();
+  // 陰そのもの
+  ctx.fillStyle = "rgba(18,30,18,.4)";
+  ctx.beginPath(); ctx.ellipse(sx - 8, sy + 14, 88, 76, 0, 0, 7); ctx.fill();
+  if (th === 0) { // 木
+    ctx.fillStyle = "#6b4423"; ctx.beginPath(); ctx.arc(sx, sy, 9, 0, 7); ctx.fill();
+    ctx.fillStyle = "#2e6b2e";
+    ctx.beginPath(); ctx.arc(sx, sy, 52, 0, 7); ctx.arc(sx - 34, sy + 14, 32, 0, 7); ctx.arc(sx + 36, sy + 12, 34, 0, 7); ctx.arc(sx + 4, sy - 34, 34, 0, 7); ctx.fill();
+    ctx.fillStyle = "#3a7d3a"; ctx.beginPath(); ctx.arc(sx - 12, sy - 10, 30, 0, 7); ctx.fill();
+  } else if (th === 1) { // 大岩
+    ctx.fillStyle = "#8b8b93";
+    ctx.beginPath(); ctx.arc(sx, sy, 46, 0, 7); ctx.arc(sx - 30, sy + 16, 28, 0, 7); ctx.arc(sx + 32, sy + 14, 30, 0, 7); ctx.fill();
+    ctx.fillStyle = "#a5a5ad"; ctx.beginPath(); ctx.arc(sx - 12, sy - 14, 24, 0, 7); ctx.fill();
+  } else if (th === 2) { // 橋脚
+    ctx.fillStyle = "#3d4450"; ctx.fillRect(sx - 16, sy - 56, 32, 112);
+    ctx.fillStyle = "#59627340"; ctx.fillRect(sx - 44, sy - 8, 88, 14);
+    ctx.fillStyle = "#2c313a"; ctx.fillRect(sx - 16, sy - 56, 32, 10); ctx.fillRect(sx - 16, sy + 46, 32, 10);
+  } else { // 城・王座の柱
+    ctx.fillStyle = th === 4 ? "#5a4668" : "#8f8f9a";
+    ctx.beginPath(); ctx.arc(sx, sy, 30, 0, 7); ctx.fill();
+    ctx.fillStyle = th === 4 ? "#c9a227" : "#6f6f7a";
+    ctx.beginPath(); ctx.arc(sx, sy, 19, 0, 7); ctx.fill();
+    ctx.fillStyle = th === 4 ? "#5a4668" : "#8f8f9a";
+    ctx.beginPath(); ctx.arc(sx, sy, 10, 0, 7); ctx.fill();
+  }
+}
+
+function drawBackground() {
+  const th = theme();
+  if (th === 0) { // 草原
+    ctx.fillStyle = "#69a84f"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#5d9844";
+    for (let i = 0; i < 8; i++) {
+      const gx = ((i * 260 - (scrollX * 0.6) % 260) + 260) % (W + 260) - 130;
+      ctx.beginPath(); ctx.ellipse(gx, 120 + (i * 67) % 460, 90, 42, 0, 0, 7); ctx.fill();
+    }
+    ctx.fillStyle = "rgba(196,164,110,.5)"; ctx.fillRect(0, 296, W, 56);
+    ctx.fillStyle = "#ffd7e8";
+    for (let i = 0; i < 14; i++) {
+      const fx2 = ((i * 173 - scrollX % 173) + 173) % (W + 40) - 20;
+      const fy2 = 90 + (i * 97) % 490;
+      if (fy2 > 290 && fy2 < 358) continue;
+      ctx.fillRect(fx2, fy2, 4, 4);
+    }
+  } else if (th === 1) { // 岩場
+    ctx.fillStyle = "#8d7c5f"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#7d6c50";
+    for (let i = 0; i < 8; i++) {
+      const gx = ((i * 240 - (scrollX * 0.6) % 240) + 240) % (W + 240) - 120;
+      ctx.beginPath(); ctx.ellipse(gx, 110 + (i * 71) % 470, 100, 46, 0, 0, 7); ctx.fill();
+    }
+    ctx.fillStyle = "#9a9aa2";
+    for (let i = 0; i < 7; i++) {
+      const rx = ((i * 310 - scrollX % 310) + 310) % (W + 120) - 60;
+      const ry = 100 + (i * 83) % 480;
+      ctx.beginPath(); ctx.arc(rx, ry, 16 + (i % 3) * 7, 0, 7); ctx.arc(rx + 18, ry + 6, 10 + (i % 2) * 5, 0, 7); ctx.fill();
+    }
+    ctx.strokeStyle = "rgba(70,58,40,.5)"; ctx.lineWidth = 2;
+    for (let i = 0; i < 5; i++) {
+      const cx3 = ((i * 390 - scrollX % 390) + 390) % (W + 100) - 50;
+      ctx.beginPath(); ctx.moveTo(cx3, 130 + (i * 89) % 430); ctx.lineTo(cx3 + 26, 142 + (i * 89) % 430); ctx.lineTo(cx3 + 40, 138 + (i * 89) % 430); ctx.stroke();
+    }
+  } else if (th === 2) { // 鉄橋
+    ctx.fillStyle = "#274b6e"; ctx.fillRect(0, 0, W, H); // 谷川
+    ctx.strokeStyle = "rgba(160,200,235,.4)"; ctx.lineWidth = 2;
+    for (let i = 0; i < 10; i++) {
+      const wx = ((i * 150 - (scrollX * 1.4) % 150) + 150) % (W + 80) - 40;
+      const wy = i % 2 === 0 ? 90 + (i * 13) % 70 : 470 + (i * 17) % 80;
+      ctx.beginPath(); ctx.moveTo(wx, wy); ctx.lineTo(wx + 34, wy); ctx.stroke();
+    }
+    // 橋面
+    ctx.fillStyle = "#77562f"; ctx.fillRect(0, DECK.top - 20, W, DECK.bottom - DECK.top + 40);
+    ctx.strokeStyle = "rgba(60,40,18,.6)"; ctx.lineWidth = 2;
+    for (let i = 0; i < 16; i++) {
+      const px = ((i * 64 - scrollX % 64) + 64) % (W + 64) - 32;
+      ctx.beginPath(); ctx.moveTo(px, DECK.top - 20); ctx.lineTo(px, DECK.bottom + 20); ctx.stroke();
+    }
+    // 欄干
+    ctx.fillStyle = "#39404c"; ctx.fillRect(0, DECK.top - 24, W, 10); ctx.fillRect(0, DECK.bottom + 14, W, 10);
+    ctx.fillStyle = "#596273";
+    for (let i = 0; i < 12; i++) {
+      const px = ((i * 84 - scrollX % 84) + 84) % (W + 84) - 42;
+      ctx.fillRect(px, DECK.top - 24, 7, 10); ctx.fillRect(px, DECK.bottom + 14, 7, 10);
+    }
+  } else if (th === 3) { // 城
+    ctx.fillStyle = "#7c7c88"; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = "rgba(52,52,64,.55)"; ctx.lineWidth = 2;
+    for (let i = 0; i < 16; i++) {
+      const px = ((i * 60 - scrollX % 60) + 60) % (W + 60) - 30;
+      ctx.beginPath(); ctx.moveTo(px, FY); ctx.lineTo(px, H); ctx.stroke();
+    }
+    for (let y = FY + 30; y < H; y += 60) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+    ctx.fillStyle = "rgba(140,36,52,.75)"; ctx.fillRect(0, 288, W, 72); // 絨毯
+    ctx.fillStyle = "#ffb84d";
+    for (let i = 0; i < 8; i++) {
+      const tx = ((i * 260 - scrollX % 260) + 260) % (W + 80) - 40;
+      ctx.beginPath(); ctx.arc(tx, 92, 7, 0, 7); ctx.arc(tx, 548, 7, 0, 7); ctx.fill();
+    }
+  } else { // 王座
+    ctx.fillStyle = "#463a55"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#382c46";
+    for (let i = 0; i < 8; i++) {
+      const gx = ((i * 240 - (scrollX * 0.6) % 240) + 240) % (W + 240) - 120;
+      ctx.beginPath(); ctx.ellipse(gx, 110 + (i * 71) % 470, 100, 46, 0, 0, 7); ctx.fill();
+    }
+    ctx.fillStyle = "#8c2434"; ctx.fillRect(0, 252, W, 116); // 赤い絨毯
+    ctx.fillStyle = "#c9a227"; ctx.fillRect(0, 252, W, 5); ctx.fillRect(0, 363, W, 5);
+    // 柱
+    for (let i = 0; i < 5; i++) {
+      const px = ((i * 300 - scrollX % 300) + 300) % (W + 120) - 60;
+      ctx.fillStyle = "#5a4668"; ctx.fillRect(px - 15, 62, 30, 44); ctx.fillRect(px - 15, 500, 30, 44);
+      ctx.fillStyle = "#c9a227"; ctx.fillRect(px - 15, 100, 30, 5); ctx.fillRect(px - 15, 500, 30, 5);
+    }
+    ctx.fillStyle = "#ffcf7a";
+    for (let i = 0; i < 8; i++) {
+      const tx = ((i * 260 - scrollX % 260) + 260) % (W + 80) - 40;
+      ctx.beginPath(); ctx.arc(tx, 128, 5, 0, 7); ctx.arc(tx, 486, 5, 0, 7); ctx.fill();
+    }
+  }
+}
+
+function drawBoss(b) {
+  ctx.save(); ctx.translate(b.x, b.y);
+  if (b.flash > 0) ctx.globalAlpha = 0.6;
+  if (b.mode === "tele") { ctx.strokeStyle = "rgba(255,60,60,.8)"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, 58 + Math.sin(time * 0.6) * 4, 0, 7); ctx.stroke(); }
+  ctx.fillStyle = "rgba(0,0,0,.3)"; ctx.beginPath(); ctx.ellipse(3, 40, 44, 13, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = "#14141c"; ctx.beginPath(); ctx.ellipse(0, 12, 36, 30, 0, 0, 7); ctx.fill(); // 甲冑
+  ctx.fillStyle = "#0c0c12"; ctx.beginPath(); ctx.moveTo(16, 6); ctx.lineTo(46, 30); ctx.lineTo(20, 44); ctx.lineTo(10, 20); ctx.fill(); // マント
+  ctx.fillStyle = "#1e1e28"; ctx.beginPath(); ctx.arc(0, -16, 27, 0, 7); ctx.fill(); // 兜
+  ctx.strokeStyle = "#3a3a48"; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.moveTo(-24, -30); ctx.quadraticCurveTo(-38, -48, -26, -56); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(24, -30); ctx.quadraticCurveTo(38, -48, 26, -56); ctx.stroke(); // 角
+  ctx.fillStyle = "#ff2a2a"; ctx.fillRect(-13, -18, 26, 5); // 目
+  ctx.strokeStyle = "#d9dee6"; ctx.lineWidth = 7;
+  ctx.beginPath(); ctx.moveTo(-34, 8); ctx.lineTo(-58, 26); ctx.stroke(); // 大剣
+  ctx.restore();
+  // HPバー
+  ctx.fillStyle = "rgba(0,0,0,.5)"; ctx.fillRect(b.x - 52, b.y - 86, 104, 10);
+  ctx.fillStyle = "#e33"; ctx.fillRect(b.x - 52, b.y - 86, 104 * Math.max(0, b.hp) / b.maxhp, 10);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center";
+  ctx.fillText("黒騎士団長", b.x, b.y - 94);
+}
+
+function draw() {
+  drawBackground();
+
+  for (const t of trees) {
+    const sx = t.worldX - scrollX, sy = t.worldY;
+    drawShadeObject(sx, sy);
+    drawDeitsu(sx + 52, sy + 30);
+    ctx.fillStyle = "#14300f"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("デイツ", sx + 52, sy + 62);
+  }
+
+  if (goal.active) {
+    drawElmiria(goal.x, goal.y);
+    ctx.fillStyle = "#14300f"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("エルミリア", goal.x, goal.y - 58);
+  }
+
+  for (const e of enemies) {
+    ctx.save(); ctx.translate(e.x, e.y);
+    if (e.flash > 0) ctx.globalAlpha = 0.55;
+    ctx.fillStyle = "rgba(0,0,0,.2)"; ctx.beginPath(); ctx.ellipse(1, 10, 14, 5, 0, 0, 7); ctx.fill();
+    if (e.kind === "slime") {
+      ctx.fillStyle = "#58b368"; ctx.beginPath(); ctx.arc(0, 0, 15, 0, 7); ctx.fill();
+      ctx.fillStyle = "#7cc98a"; ctx.beginPath(); ctx.arc(-4, -4, 8, 0, 7); ctx.fill();
+      ctx.fillStyle = "#123"; ctx.fillRect(-6, -2, 3.4, 4); ctx.fillRect(3, -2, 3.4, 4);
+    } else if (e.kind === "bat") {
+      ctx.fillStyle = "#5a4a8c";
+      const f = Math.sin(e.t / 5) * 6;
+      ctx.beginPath(); ctx.ellipse(-14, -f * 0.4, 13, 6, -0.5, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(14, -f * 0.4, 13, 6, 0.5, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.arc(0, 0, 8.5, 0, 7); ctx.fill();
+      ctx.fillStyle = "#ffd23c"; ctx.fillRect(-4, -1.5, 3, 3); ctx.fillRect(2, -1.5, 3, 3);
+    } else {
+      ctx.fillStyle = "#6e6e7a"; ctx.beginPath(); ctx.ellipse(0, 3, 13, 11, 0, 0, 7); ctx.fill();
+      ctx.fillStyle = "#8b8b98"; ctx.beginPath(); ctx.arc(0, -2, 10.5, 0, 7); ctx.fill();
+      ctx.fillStyle = "#3a3a44"; ctx.fillRect(-9, -4, 18, 3);
+      ctx.fillStyle = "#5a4632"; ctx.fillRect(9, 2, 10, 12);
+      ctx.fillStyle = "#14300f"; ctx.font = "bold 10px sans-serif"; ctx.textAlign = "center"; ctx.fillText(e.hp, 0, -20);
+    }
+    ctx.restore();
+  }
+
+  if (boss) drawBoss(boss);
+  ctx.fillStyle = "#2a1a3e";
+  for (const bo of bolts) { ctx.beginPath(); ctx.arc(bo.x, bo.y, 7, 0, 7); ctx.fill(); ctx.fillStyle = "#7a4ae0"; ctx.beginPath(); ctx.arc(bo.x, bo.y, 3.4, 0, 7); ctx.fill(); ctx.fillStyle = "#2a1a3e"; }
+
+  ctx.strokeStyle = "#ffe9a8"; ctx.lineWidth = 4;
+  for (const w of waves) {
+    const a = Math.atan2(w.vy, w.vx);
+    ctx.beginPath(); ctx.arc(w.x, w.y, 12, a - 1.1, a + 1.1); ctx.stroke();
+  }
+
+  if (heartT > 0 && heartTree) {
+    const s = shadeOf(heartTree);
+    drawShiika(P.x, P.y, false, P.ang, 0, 0);
+    const pulse = 1 + Math.sin(time / 6) * 0.05;
+    ctx.fillStyle = "rgba(255,105,160,.88)";
+    heartPath(s.x + 8, s.y + 2, 52 * pulse); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.35)";
+    heartPath(s.x - 6, s.y - 10, 18 * pulse); ctx.fill();
+    ctx.fillStyle = "#a4133c"; ctx.font = "bold 14px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("ハートタイム", s.x + 8, s.y - 66);
+    ctx.fillStyle = "rgba(0,0,0,.4)"; ctx.fillRect(s.x - 42, s.y - 60, 100, 7);
+    ctx.fillStyle = "#ff69a0"; ctx.fillRect(s.x - 42, s.y - 60, 100 * heartT / 180, 7);
+  } else {
+    drawShiika(P.x, P.y, P.powered, P.ang, P.swingT, P.inv);
+  }
+  ctx.fillStyle = "#14300f"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
+  ctx.fillText("シィカ", P.x, P.y - 26);
+
+  for (const p of parts) {
+    if (p.kind === "heart") {
+      ctx.fillStyle = "rgba(255,105,160,.92)";
+      heartPath(p.x, p.y, 7); ctx.fill();
+    } else if (p.kind === "awake") {
+      ctx.fillStyle = "#c2410c"; ctx.font = "bold 15px sans-serif"; ctx.textAlign = "center";
+      ctx.fillText("覚醒！", p.x, p.y);
+    } else if (p.kind === "bossin") {
+      ctx.fillStyle = "#e33"; ctx.font = "bold 22px sans-serif"; ctx.textAlign = "center";
+      ctx.fillText("黒騎士団長 現る！", p.x, p.y);
+    } else if (p.kind === "break") {
+      ctx.fillStyle = "#666"; ctx.font = "13px sans-serif"; ctx.textAlign = "center";
+      ctx.fillText("💔", p.x, p.y);
+    } else {
+      ctx.fillStyle = "#ffe9a8"; ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+    }
+  }
+
+  if (P.inShade && P.powered && heartT <= 0) {
+    ctx.fillStyle = "#c2410c"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("デイツのそば：ゲージ停止中", P.x, P.y - 40);
+  }
+
+  // HUD
+  ctx.fillStyle = "rgba(16,24,10,.88)"; ctx.fillRect(0, 0, W, FY);
+  ctx.fillStyle = "#eef3e0"; ctx.font = "bold 14px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("SCORE " + score, 12, 26);
+  ctx.fillText(stage + "面 " + stageName(), 215, 26);
+  ctx.fillStyle = "#ffb3c8";
+  ctx.fillText("HP " + "♥".repeat(Math.max(0, P.hp)) + "♡".repeat(Math.max(0, 4 - P.hp)), 330, 26);
+  if (!boss && !goal.active) {
+    const prog = clamp(scrollX / stageLen, 0, 1);
+    ctx.fillStyle = "rgba(255,255,255,.25)"; ctx.fillRect(520, 14, 180, 10);
+    ctx.fillStyle = "#ffd23c"; ctx.fillRect(520, 14, 180 * prog, 10);
+    ctx.fillStyle = "#eef3e0"; ctx.font = "bold 11px sans-serif"; ctx.fillText(stage === 5 ? "ボスまで" : "ゴールまで", 520, 36);
+  } else if (boss) {
+    ctx.fillStyle = "#fda4af"; ctx.font = "bold 12px sans-serif"; ctx.fillText("ボス戦！", 520, 26);
+  }
+  ctx.textAlign = "right";
+  if (P.powered) {
+    ctx.fillStyle = "#ff69a0"; ctx.font = "bold 14px sans-serif";
+    ctx.fillText("覚醒ゲージ " + Math.ceil(P.gauge), W - 12, 16);
+    ctx.fillStyle = "rgba(255,255,255,.25)"; ctx.fillRect(W - 172, 22, 160, 9);
+    ctx.fillStyle = "#ff69a0"; ctx.fillRect(W - 172, 22, 160 * P.gauge / 100, 9);
+  } else {
+    ctx.fillStyle = "#9fb08a"; ctx.font = "bold 13px sans-serif";
+    ctx.fillText("通常（弱）", W - 12, 26);
+  }
+  ctx.textAlign = "left"; ctx.fillStyle = "#8fa876"; ctx.font = "12px sans-serif";
+  ctx.fillText("HI " + hi, 120, 26);
+
+  ctx.fillStyle = "rgba(255,255,255,.18)"; ctx.beginPath(); ctx.arc(830, 540, 46, 0, 7); ctx.fill();
+  ctx.fillStyle = "#fff"; ctx.font = "bold 15px sans-serif"; ctx.textAlign = "center";
+  ctx.fillText("剣", 830, 546);
+
+  if (bannerT > 0 && scene === "play") {
+    ctx.fillStyle = "rgba(10,16,6,.55)"; ctx.fillRect(0, 240, W, 74);
+    ctx.fillStyle = "#fff"; ctx.font = "bold 27px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(stage + "面 " + stageName() + (stage === 5 ? "　ボスを倒して姫を救え！" : ""), W / 2, 286);
+  }
+  if (scene === "title") {
+    ctx.fillStyle = "rgba(12,18,8,.84)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#cfe8a8"; ctx.font = "bold 34px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("シィカとエルミリアの聖戦", W / 2, 140);
+    ctx.fillStyle = "#eef3e0"; ctx.font = "17px sans-serif";
+    ctx.fillText("草原・岩場・鉄橋・城・王座の5面を進むアクションです。", W / 2, 190);
+    ctx.fillText("普段のシィカは弱い。デイツのいる陰に入ると、大きなハートに隠れて", W / 2, 222);
+    ctx.fillText("ハートタイム（3秒・無敵・動けない）が始まり、終わると覚醒します。", W / 2, 250);
+    ctx.fillText("覚醒中は剣が強力に。ゲージは時間で減りますが、", W / 2, 282);
+    ctx.fillText("敵を倒す・デイツの陰にいる・次のハートタイムで延ばせます。", W / 2, 310);
+    ctx.fillText("最終面では黒騎士団長が出現。倒せばエルミリアを救出できます。", W / 2, 342);
+    ctx.font = "bold 19px sans-serif"; ctx.fillStyle = "#ffd23c";
+    ctx.fillText("クリックかスペースでスタート", W / 2, 408);
+  }
+  if (scene === "stageclear") {
+    ctx.fillStyle = "rgba(12,18,8,.78)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#ffd23c"; ctx.font = "bold 32px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(stage + "面 " + stageName() + " クリア！", W / 2, 268);
+    ctx.fillStyle = "#fff"; ctx.font = "18px sans-serif";
+    ctx.fillText("SCORE " + score + "　次は " + (stage + 1) + "面 " + STAGES[stage].name + " へ…", W / 2, 312);
+  }
+  if (scene === "clear") {
+    ctx.fillStyle = "rgba(20,14,8,.85)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#ffd23c"; ctx.font = "bold 34px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("エルミリア救出！ ゲームクリア", W / 2, 240);
+    ctx.fillStyle = "#fff"; ctx.font = "19px sans-serif";
+    ctx.fillText("SCORE " + score + "　HI " + hi, W / 2, 292);
+    ctx.fillText("シィカとデイツの戦いは、ひとまず終わりました。", W / 2, 330);
+    if (bannerT <= 0) { ctx.font = "bold 17px sans-serif"; ctx.fillStyle = "#ffd23c"; ctx.fillText("クリックかスペースでもう一度", W / 2, 386); }
+  }
+  if (scene === "gameover") {
+    ctx.fillStyle = "rgba(12,10,14,.85)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#fda4af"; ctx.font = "bold 34px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("ゲームオーバー", W / 2, 258);
+    ctx.fillStyle = "#fff"; ctx.font = "18px sans-serif";
+    ctx.fillText(stage + "面 " + stageName() + "　SCORE " + score + "　HI " + hi, W / 2, 302);
+    if (bannerT <= 0) { ctx.font = "bold 17px sans-serif"; ctx.fillStyle = "#ffd23c"; ctx.fillText("クリックかスペースでもう一度", W / 2, 356); }
+  }
+}
+
+function loop() { tick(); draw(); requestAnimationFrame(loop); }
+loop();
+cv.addEventListener("click", () => { if (scene === "title" || ((scene === "gameover" || scene === "clear") && bannerT <= 0)) startGame(); });
+
+window.__SS = {
+  state: () => ({ scene, score, hi, stage, stageName: stageName(), scrollX: Math.round(scrollX), stageLen, hp: P.hp, powered: P.powered, gauge: Math.round(P.gauge * 10) / 10, heartT, heartActive: heartT > 0, inShade: P.inShade, x: Math.round(P.x), y: Math.round(P.y), ang: Math.round(P.ang * 100) / 100, enemies: enemies.map(e => ({ kind: e.kind, x: Math.round(e.x), y: Math.round(e.y), hp: e.hp })), boss: boss ? { hp: boss.hp, x: Math.round(boss.x), y: Math.round(boss.y), mode: boss.mode } : null, goal: { active: goal.active, x: Math.round(goal.x), y: goal.y }, shade: (() => { const s = currentShade(); return s ? { x: Math.round(s.x), y: Math.round(s.y) } : null; })() }),
+  start: () => startGame(),
+  tick: n => { for (let i = 0; i < n; i++) tick(); },
+  key: (k, d) => { keys[k] = d; },
+  action: () => tryAttack(),
+  setPos: (x, y) => { P.x = x; P.y = y; },
+  setGauge: v => { P.gauge = v; },
+  setHp: v => { P.hp = v; },
+  setScroll: v => { scrollX = v; },
+  setBossHp: v => { if (boss) boss.hp = v; },
+  treeNow: () => { trees.push({ worldX: scrollX + 450, worldY: 330, used: false }); },
+  enemyAt: (kind, x, y) => { const e = { kind, x, y, hp: kind === "knight" ? 5 : kind === "slime" ? 2 : 1, spd: 0.3, sc: kind === "knight" ? 300 : kind === "slime" ? 100 : 150, t: 0, flash: 0 }; enemies.push(e); return e; },
+  clearEnemies: () => { enemies = []; },
+};
+</script>
+</body>
+</html>
