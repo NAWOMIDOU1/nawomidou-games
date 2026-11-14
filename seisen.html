@@ -63,14 +63,14 @@ let P;
 let enemies, waves, trees, parts, bolts;
 let goal, boss;
 let nextTreeAt, spawnT;
-let heartT = 0, heartTree = null;
+let heartT = 0, heartTree = null, heartSpecial = false;
 let bossTreeT = 0;
 
 function theme() { return STAGES[stage - 1].theme; }
 function stageName() { return STAGES[stage - 1].name; }
 
 function resetPlayer() {
-  P = { x: 180, y: 330, ang: 0, hp: 4, inv: 0, swingT: 0, cool: 0, powered: false, gauge: 0, inShade: false };
+  P = { x: 180, y: 330, ang: 0, hp: 4, inv: 0, swingT: 0, cool: 0, powered: false, special: false, gauge: 0, inShade: false };
 }
 function setupStage() {
   stageLen = STAGES[stage - 1].len;
@@ -79,8 +79,8 @@ function setupStage() {
   goal = { worldX: 0, active: false, x: -200, y: 320 };
   boss = null; bossTreeT = 0;
   nextTreeAt = 480; spawnT = 90;
-  heartT = 0; heartTree = null;
-  P.hp = 4; P.inv = 60; P.x = 180; P.y = 330; P.powered = false; P.gauge = 0;
+  heartT = 0; heartTree = null; heartSpecial = false;
+  P.hp = 4; P.inv = 60; P.x = 180; P.y = 330; P.powered = false; P.special = false; P.gauge = 0;
   bannerT = 150;
 }
 resetPlayer();
@@ -95,10 +95,16 @@ function tryAttack() {
   if (scene === "title") { startGame(); return; }
   if (scene === "gameover" || scene === "clear") { if (bannerT <= 0) startGame(); return; }
   if (scene !== "play" || P.cool > 0 || heartT > 0) return;
-  P.cool = P.powered ? 16 : 26;
+  P.cool = (P.powered || P.special) ? 16 : 26;
   P.swingT = 9;
-  const range = P.powered ? 80 : 56, dmg = P.powered ? 3 : 1;
+  const range = P.special ? 300 : P.powered ? 80 : 56, dmg = (P.powered || P.special) ? 3 : 1;
   const fx = Math.cos(P.ang), fy = Math.sin(P.ang);
+  if (P.special) { // 10倍の剣でボスの弾を薙ぎ払う
+    for (const bo of bolts) {
+      const dx = bo.x - P.x, dy = bo.y - P.y, d = Math.hypot(dx, dy);
+      if (d < 340 && (dx * fx + dy * fy) / (d || 1) > -0.1) { bo.x = -999; score += 10; }
+    }
+  }
   for (const e of enemies) {
     const dx = e.x - P.x, dy = e.y - P.y, d = Math.hypot(dx, dy);
     if (d < range + 14 && (d < 20 || (dx * fx + dy * fy) / (d || 1) > 0.3)) {
@@ -113,7 +119,7 @@ function tryAttack() {
       parts.push({ x: boss.x - 20, y: boss.y, vx: rnd(-0.4, 0.4), vy: rnd(-1, -0.3), t: 0, life: 22, kind: "spark" });
     }
   }
-  if (P.powered) waves.push({ x: P.x + fx * 26, y: P.y + fy * 26, vx: fx * 3.4, vy: fy * 3.4, dmg: 2, life: 42 });
+  if (P.powered || P.special) waves.push({ x: P.x + fx * 26, y: P.y + fy * 26, vx: fx * 3.4, vy: fy * 3.4, dmg: 2, life: 42 });
 }
 
 function spawnEnemy() {
@@ -137,17 +143,21 @@ function damagePlayer() {
 
 function killEnemy(e) {
   score += e.sc;
-  if (P.powered) P.gauge = Math.min(100, P.gauge + 5);
+  if (P.special) P.gauge = Math.min(100, P.gauge + 3);
+  else if (P.powered) P.gauge = Math.min(100, P.gauge + 5);
   for (let i = 0; i < 6; i++) parts.push({ x: e.x, y: e.y, vx: rnd(-1, 1), vy: rnd(-1.2, 0.2), t: 0, life: 26, kind: "spark" });
 }
 
 function shadeOf(t) { return { x: t.worldX - scrollX, y: t.worldY }; }
 function currentShade() {
+  let best = null, bestD = 1e9;
   for (const t of trees) {
     const s = shadeOf(t);
-    if (s.x > -120 && s.x < W + 120) return { x: s.x, y: s.y, tree: t };
+    if (s.x <= -120 || s.x >= W + 120) continue;
+    const d = Math.hypot(P.x - s.x, P.y - s.y);
+    if (d < bestD) { bestD = d; best = { x: s.x, y: s.y, tree: t }; }
   }
-  return null;
+  return best;
 }
 function addTree(worldX) {
   const th = theme();
@@ -155,8 +165,8 @@ function addTree(worldX) {
 }
 
 function spawnBoss() {
-  boss = { x: 780, y: 320, hp: 30, maxhp: 30, t: 0, mode: "hover", modeT: 0, flash: 0, vx: 0, vy: 0 };
-  addTree(scrollX + 430);
+  boss = { x: 780, y: 320, hp: 30, maxhp: 30, t: 0, mode: "wait", modeT: 0, flash: 0, vx: 0, vy: 0 };
+  trees.push({ worldX: scrollX + 430, worldY: 320, used: false, special: true, coolT: 0 }); // デイツのスペシャルな陰
   parts.push({ x: 450, y: 200, vx: 0, vy: -0.4, t: 0, life: 70, kind: "bossin" });
 }
 
@@ -197,10 +207,11 @@ function tick() {
   }
   if (bossFight) {
     bossTreeT++;
-    const hasUnused = trees.some(t => !t.used && (t.worldX - scrollX) > -120);
+    const hasUnused = trees.some(t => !t.used && !t.special && (t.worldX - scrollX) > -120);
     if (!hasUnused && bossTreeT > 1300) { addTree(scrollX + 430); bossTreeT = 0; }
   }
   trees = trees.filter(t => t.worldX - scrollX > -170);
+  for (const t of trees) if (t.coolT > 0) t.coolT--;
 
   // 木陰判定
   const sh = currentShade();
@@ -214,8 +225,16 @@ function tick() {
       parts.push({ x: P.x + 12, y: P.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v - 0.4, t: 0, life: rnd(30, 55), kind: "heart" });
     }
     if (heartT === 0) {
-      P.powered = true; P.gauge = 100;
-      if (heartTree) heartTree.used = true;
+      if (heartSpecial) {
+        P.special = true; P.powered = false; P.gauge = 100;
+        if (heartTree) heartTree.coolT = 240; // スペシャルな陰は残る（少し待てば再使用可）
+        if (boss && boss.mode === "wait") { boss.mode = "hover"; boss.modeT = 0; }
+        parts.push({ x: P.x + 12, y: P.y - 34, vx: 0, vy: -0.7, t: 0, life: 52, kind: "spawake" });
+      } else {
+        P.powered = true; P.gauge = 100;
+        if (heartTree) heartTree.used = true;
+      }
+      heartSpecial = false;
       heartTree = null;
       for (let i = 0; i < 14; i++) {
         const a = (i / 14) * Math.PI * 2;
@@ -224,7 +243,7 @@ function tick() {
       parts.push({ x: P.x + 12, y: P.y - 30, vx: 0, vy: -0.7, t: 0, life: 46, kind: "awake" });
     }
   } else {
-    if (P.inShade && sh && !sh.tree.used) { heartT = 180; heartTree = sh.tree; }
+    if (P.inShade && sh && !sh.tree.used && !(sh.tree.coolT > 0)) { heartT = 180; heartTree = sh.tree; heartSpecial = !!sh.tree.special; }
 
     let mx = 0, my = 0;
     if (keys["arrowleft"] || keys["a"]) mx -= 1;
@@ -246,7 +265,10 @@ function tick() {
   if (P.swingT > 0) P.swingT--;
 
   // ゲージ
-  if (P.powered) {
+  if (P.special) {
+    if (!P.inShade) P.gauge -= 0.025; // スペシャル覚醒はゆっくり減る
+    if (P.gauge <= 0) { P.gauge = 0; P.special = false; }
+  } else if (P.powered) {
     if (!P.inShade) P.gauge -= 0.12;
     if (P.gauge <= 0) { P.gauge = 0; P.powered = false; }
   }
@@ -275,7 +297,9 @@ function tick() {
     const b = boss;
     b.t++; b.modeT++;
     if (b.flash > 0) b.flash--;
-    if (b.mode === "hover") {
+    if (b.mode === "wait") {
+      // スペシャルハートタイムが終わるまで襲ってこない
+    } else if (b.mode === "hover") {
       b.y += clamp(P.y - b.y, -0.5, 0.5) + Math.sin(b.t / 30) * 0.4;
       b.x += clamp(720 - b.x, -0.6, 0.6);
       if (b.modeT % 150 === 0) {
@@ -337,7 +361,7 @@ function heartPath(x, y, s) {
   ctx.closePath();
 }
 
-function drawShiika(x, y, powered, ang, swingT, inv) {
+function drawShiika(x, y, powered, ang, swingT, inv, special) {
   ctx.save(); ctx.translate(x, y);
   if (inv > 0 && (time >> 2) % 2 === 0) ctx.globalAlpha = 0.35;
   ctx.fillStyle = "rgba(0,0,0,.22)"; ctx.beginPath(); ctx.ellipse(2, 14, 15, 6, 0, 0, 7); ctx.fill();
@@ -351,13 +375,14 @@ function drawShiika(x, y, powered, ang, swingT, inv) {
   ctx.fillStyle = "#3a6ad8"; ctx.beginPath(); ctx.arc(-fx * 8.6, -2 - fy * 8.6, 3, 0, 7); ctx.fill();
   const sw = swingT > 0 ? (-1.15 + (9 - swingT) * 0.26) : 0.55;
   const ka = ang + sw;
-  ctx.strokeStyle = "#d9dee6"; ctx.lineWidth = 4;
-  ctx.beginPath(); ctx.moveTo(Math.cos(ka) * 9, Math.sin(ka) * 9 - 1); ctx.lineTo(Math.cos(ka) * (powered ? 36 : 28), Math.sin(ka) * (powered ? 36 : 28) - 1); ctx.stroke();
+  const blade = special ? 280 : powered ? 36 : 28; // スペシャルは剣の長さ10倍
+  ctx.strokeStyle = special ? "#ffe9a8" : "#d9dee6"; ctx.lineWidth = special ? 6 : 4;
+  ctx.beginPath(); ctx.moveTo(Math.cos(ka) * 9, Math.sin(ka) * 9 - 1); ctx.lineTo(Math.cos(ka) * blade, Math.sin(ka) * blade - 1); ctx.stroke();
   ctx.strokeStyle = "#c9a227"; ctx.lineWidth = 3;
   ctx.beginPath(); ctx.moveTo(Math.cos(ka) * 6, Math.sin(ka) * 6 - 1); ctx.lineTo(Math.cos(ka) * 11, Math.sin(ka) * 11 - 1); ctx.stroke();
   if (powered && swingT > 0) {
-    ctx.strokeStyle = "rgba(255,215,120,.7)"; ctx.lineWidth = 4;
-    ctx.beginPath(); ctx.arc(0, 0, 44, ang - 1.15, ang + 1.15); ctx.stroke();
+    ctx.strokeStyle = "rgba(255,215,120,.7)"; ctx.lineWidth = special ? 7 : 4;
+    ctx.beginPath(); ctx.arc(0, 0, special ? 300 : 44, ang - 1.15, ang + 1.15); ctx.stroke();
   }
   if (powered) { ctx.fillStyle = "rgba(255,190,60,.3)"; ctx.beginPath(); ctx.arc(0, 0, 26, 0, 7); ctx.fill(); }
   ctx.restore();
@@ -540,6 +565,13 @@ function draw() {
     drawDeitsu(sx + 52, sy + 30);
     ctx.fillStyle = "#14300f"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
     ctx.fillText("デイツ", sx + 52, sy + 62);
+    if (t.special) {
+      const pulse = 1 + Math.sin(time / 7) * 0.12;
+      ctx.fillStyle = "#ffb52e";
+      heartPath(sx, sy - 78, 17 * pulse); ctx.fill();
+      ctx.fillStyle = "#a46a00"; ctx.font = "bold 13px sans-serif";
+      ctx.fillText("スペシャルハートタイム", sx, sy - 108);
+    }
   }
 
   if (goal.active) {
@@ -585,18 +617,18 @@ function draw() {
 
   if (heartT > 0 && heartTree) {
     const s = shadeOf(heartTree);
-    drawShiika(P.x, P.y, false, P.ang, 0, 0);
+    drawShiika(P.x, P.y, false, P.ang, 0, 0, false);
     const pulse = 1 + Math.sin(time / 6) * 0.05;
-    ctx.fillStyle = "rgba(255,105,160,.88)";
+    ctx.fillStyle = heartSpecial ? "rgba(255,181,46,.92)" : "rgba(255,105,160,.88)";
     heartPath(s.x + 8, s.y + 2, 52 * pulse); ctx.fill();
     ctx.fillStyle = "rgba(255,255,255,.35)";
     heartPath(s.x - 6, s.y - 10, 18 * pulse); ctx.fill();
-    ctx.fillStyle = "#a4133c"; ctx.font = "bold 14px sans-serif"; ctx.textAlign = "center";
-    ctx.fillText("ハートタイム", s.x + 8, s.y - 66);
+    ctx.fillStyle = heartSpecial ? "#a46a00" : "#a4133c"; ctx.font = "bold 14px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(heartSpecial ? "スペシャルハートタイム" : "ハートタイム", s.x + 8, s.y - 66);
     ctx.fillStyle = "rgba(0,0,0,.4)"; ctx.fillRect(s.x - 42, s.y - 60, 100, 7);
-    ctx.fillStyle = "#ff69a0"; ctx.fillRect(s.x - 42, s.y - 60, 100 * heartT / 180, 7);
+    ctx.fillStyle = heartSpecial ? "#ffb52e" : "#ff69a0"; ctx.fillRect(s.x - 42, s.y - 60, 100 * heartT / 180, 7);
   } else {
-    drawShiika(P.x, P.y, P.powered, P.ang, P.swingT, P.inv);
+    drawShiika(P.x, P.y, P.powered || P.special, P.ang, P.swingT, P.inv, P.special);
   }
   ctx.fillStyle = "#14300f"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
   ctx.fillText("シィカ", P.x, P.y - 26);
@@ -608,6 +640,9 @@ function draw() {
     } else if (p.kind === "awake") {
       ctx.fillStyle = "#c2410c"; ctx.font = "bold 15px sans-serif"; ctx.textAlign = "center";
       ctx.fillText("覚醒！", p.x, p.y);
+    } else if (p.kind === "spawake") {
+      ctx.fillStyle = "#d97706"; ctx.font = "bold 17px sans-serif"; ctx.textAlign = "center";
+      ctx.fillText("スペシャル覚醒！", p.x, p.y);
     } else if (p.kind === "bossin") {
       ctx.fillStyle = "#e33"; ctx.font = "bold 22px sans-serif"; ctx.textAlign = "center";
       ctx.fillText("黒騎士団長 現る！", p.x, p.y);
@@ -640,7 +675,12 @@ function draw() {
     ctx.fillStyle = "#fda4af"; ctx.font = "bold 12px sans-serif"; ctx.fillText("ボス戦！", 520, 26);
   }
   ctx.textAlign = "right";
-  if (P.powered) {
+  if (P.special) {
+    ctx.fillStyle = "#ffb52e"; ctx.font = "bold 14px sans-serif";
+    ctx.fillText("スペシャル覚醒 " + Math.ceil(P.gauge), W - 12, 16);
+    ctx.fillStyle = "rgba(255,255,255,.25)"; ctx.fillRect(W - 172, 22, 160, 9);
+    ctx.fillStyle = "#ffb52e"; ctx.fillRect(W - 172, 22, 160 * P.gauge / 100, 9);
+  } else if (P.powered) {
     ctx.fillStyle = "#ff69a0"; ctx.font = "bold 14px sans-serif";
     ctx.fillText("覚醒ゲージ " + Math.ceil(P.gauge), W - 12, 16);
     ctx.fillStyle = "rgba(255,255,255,.25)"; ctx.fillRect(W - 172, 22, 160, 9);
@@ -671,7 +711,8 @@ function draw() {
     ctx.fillText("ハートタイム（3秒・無敵・動けない）が始まり、終わると覚醒します。", W / 2, 250);
     ctx.fillText("覚醒中は剣が強力に。ゲージは時間で減りますが、", W / 2, 282);
     ctx.fillText("敵を倒す・デイツの陰にいる・次のハートタイムで延ばせます。", W / 2, 310);
-    ctx.fillText("最終面では黒騎士団長が出現。倒せばエルミリアを救出できます。", W / 2, 342);
+    ctx.fillText("最終面では黒騎士団長の前にデイツが現れ、スペシャルハートタイム。", W / 2, 342);
+    ctx.fillText("剣が10倍に伸びて弾を薙ぎ払えるようになり、ボスを倒すと姫を救出できます。", W / 2, 368);
     ctx.font = "bold 19px sans-serif"; ctx.fillStyle = "#ffd23c";
     ctx.fillText("クリックかスペースでスタート", W / 2, 408);
   }
@@ -706,7 +747,7 @@ loop();
 cv.addEventListener("click", () => { if (scene === "title" || ((scene === "gameover" || scene === "clear") && bannerT <= 0)) startGame(); });
 
 window.__SS = {
-  state: () => ({ scene, score, hi, stage, stageName: stageName(), scrollX: Math.round(scrollX), stageLen, hp: P.hp, powered: P.powered, gauge: Math.round(P.gauge * 10) / 10, heartT, heartActive: heartT > 0, inShade: P.inShade, x: Math.round(P.x), y: Math.round(P.y), ang: Math.round(P.ang * 100) / 100, enemies: enemies.map(e => ({ kind: e.kind, x: Math.round(e.x), y: Math.round(e.y), hp: e.hp })), boss: boss ? { hp: boss.hp, x: Math.round(boss.x), y: Math.round(boss.y), mode: boss.mode } : null, goal: { active: goal.active, x: Math.round(goal.x), y: goal.y }, shade: (() => { const s = currentShade(); return s ? { x: Math.round(s.x), y: Math.round(s.y) } : null; })() }),
+  state: () => ({ scene, score, hi, stage, stageName: stageName(), scrollX: Math.round(scrollX), stageLen, hp: P.hp, powered: P.powered, special: P.special, gauge: Math.round(P.gauge * 10) / 10, heartT, heartActive: heartT > 0, inShade: P.inShade, x: Math.round(P.x), y: Math.round(P.y), ang: Math.round(P.ang * 100) / 100, enemies: enemies.map(e => ({ kind: e.kind, x: Math.round(e.x), y: Math.round(e.y), hp: e.hp })), bolts: bolts.length, boss: boss ? { hp: boss.hp, x: Math.round(boss.x), y: Math.round(boss.y), mode: boss.mode } : null, goal: { active: goal.active, x: Math.round(goal.x), y: goal.y }, shade: (() => { const s = currentShade(); return s ? { x: Math.round(s.x), y: Math.round(s.y), special: !!s.tree.special } : null; })() }),
   start: () => startGame(),
   tick: n => { for (let i = 0; i < n; i++) tick(); },
   key: (k, d) => { keys[k] = d; },
@@ -716,6 +757,8 @@ window.__SS = {
   setHp: v => { P.hp = v; },
   setScroll: v => { scrollX = v; },
   setBossHp: v => { if (boss) boss.hp = v; },
+  addBolt: (x, y, vx, vy) => { bolts.push({ x, y, vx, vy }); },
+  clearBolts: () => { bolts = []; },
   treeNow: () => { trees.push({ worldX: scrollX + 450, worldY: 330, used: false }); },
   enemyAt: (kind, x, y) => { const e = { kind, x, y, hp: kind === "knight" ? 5 : kind === "slime" ? 2 : 1, spd: 0.3, sc: kind === "knight" ? 300 : kind === "slime" ? 100 : 150, t: 0, flash: 0 }; enemies.push(e); return e; },
   clearEnemies: () => { enemies = []; },
