@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>セブンドック | NAWOMIDOUゲーム館</title>
+<style>
+  body { margin:0; background:#0d0d1a; color:#e8e8f2; font-family:"Hiragino Kaku Gothic ProN","Yu Gothic",sans-serif; text-align:center; }
+  .wrap { max-width:940px; margin:0 auto; padding:16px 10px 28px; }
+  h1 { font-size:22px; margin:6px 0 2px; }
+  p.sub { color:#9aa3c7; font-size:13px; margin:2px 0 10px; }
+  canvas { background:#04040c; border:2px solid #39406e; border-radius:8px; max-width:100%; height:auto; }
+  .howto { text-align:left; max-width:880px; margin:14px auto 0; font-size:14px; line-height:1.75; color:#c9cdea; }
+  .howto b { color:#ffd76a; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>セブンドック</h1>
+  <p class="sub">ドッキングで巨大化する、ムーンクレスタ風シューティング</p>
+  <canvas id="cv" width="900" height="600"></canvas>
+  <div class="howto">
+    <p><b>遊び方：</b>矢印キー／WASDで移動、スペース／Zで射撃（押しっぱなしOK）。敵のウェーブを片付けると<b>ドッキングチャンス</b>。上空で待つ次の号機に体を重ねると合体し、機体が<b>巨大化</b>。弾は合体数に応じて斜めや横にも広がります。逃した号機はもう1周回ってきて、次のウェーブ後にもまた来ます。被弾すると合体が1機ずつ剥がれますが、剥がれた号機は壊れずに予備へ戻るので、次のドッキングでまた合体できます。7機合体で<b>火の鳥フェニックス</b>に変身（20秒無敵、その後は広範囲の前方レーザーのみ）。4ウェーブごとに<b>ボス（巨大母艦）</b>が出現。全7機を失うとゲームオーバー。</p>
+  </div>
+</div>
+<script>
+"use strict";
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const W = 900, H = 600;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+let scene = "title"; // title / play / gameover
+let phase = "battle"; // battle / dock / dockwin
+let time = 0, score = 0;
+let hi = +(localStorage.getItem("sevendockHigh") || 0);
+let wave = 0;
+let P = null;
+let bullets = [], ebullets = [], enemies = [], parts = [], rings = [], stars = [];
+let spawnQ = [], spawnT = 0;
+let dock = null, dockT = 0, dockWinT = 0;
+let boss = null, bossDieT = 0;
+let laserOn = false;
+let banner = null;
+let shakeT = 0, flashT = 0;
+const keys = {};
+const UNIT_COLORS = ["#ff5a5a", "#5aa2ff", "#5aff8a", "#ffd75a", "#c95aff", "#ff9a3c", "#3ce8e0"];
+
+for (let i = 0; i < 80; i++) stars.push({ x: Math.random() * W, y: Math.random() * H, s: 0.4 + Math.random() * 1.2 });
+
+addEventListener("keydown", e => {
+  keys[e.key.toLowerCase()] = true;
+  if (["arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(e.key.toLowerCase())) e.preventDefault();
+  if ((e.key === " " || e.key === "Enter")) {
+    if (scene === "title" || scene === "gameover") newGame();
+  }
+  if ((e.key === " " || e.key.toLowerCase() === "z")) tryFire();
+});
+addEventListener("keyup", e => { keys[e.key.toLowerCase()] = false; });
+cv.addEventListener("pointerdown", () => { if (scene === "title" || scene === "gameover") newGame(); });
+
+function newGame() {
+  score = 0; wave = 0;
+  P = { x: 450, y: 500, size: 1, reserve: 6, inv: 0, cool: 0, grow: 0, phoenixT: 0 };
+  bullets = []; ebullets = []; enemies = []; parts = []; rings = [];
+  boss = null; bossDieT = 0; dock = null;
+  scene = "play";
+  startWave();
+}
+
+function buildQueue(n) {
+  const q = [];
+  const saucers = 5 + n, weavers = n >= 2 ? 3 + (n >> 1) : 0, divers = n >= 3 ? 2 + (n >> 1) : 0, meteors = 2 + (n / 3 | 0);
+  for (let i = 0; i < saucers; i++) q.push("saucer");
+  for (let i = 0; i < weavers; i++) q.push("weaver");
+  for (let i = 0; i < divers; i++) q.push("diver");
+  for (let i = 0; i < meteors; i++) q.push("meteor");
+  // 軽く混ぜる
+  for (let i = q.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [q[i], q[j]] = [q[j], q[i]]; }
+  return q;
+}
+
+function startWave() {
+  wave++;
+  phase = "battle";
+  banner = { text: wave % 4 === 0 ? "WAVE " + wave + " ― BOSS" : "WAVE " + wave, t: 130 };
+  if (wave % 4 === 0) { spawnBoss(); spawnQ = []; }
+  else { spawnQ = buildQueue(wave); spawnT = 40; }
+}
+
+function spawnBoss() {
+  const hp = 60 + wave * 12;
+  boss = { x: 450, y: 105, hp, maxhp: hp, t: 0, dir: 1, shootT: 80, spawnT: 240, flash: 0 };
+}
+
+function startDock() {
+  phase = "dock";
+  dock = { x: 450, y: 104, t: 0, flee: false, passes: 2 };
+  dockT = 720;
+  ebullets = [];
+  banner = { text: "ドッキングチャンス！", t: 110 };
+}
+
+function sectionY(i) { return P.y + i * 22 - (P.size - 1) * 11; }
+function noseY() { return sectionY(0) - 16; }
+
+function explode(x, y, n, colors, power) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, sp = (0.4 + Math.random() * 1.6) * (power || 1);
+    parts.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, t: 0, life: 26 + Math.random() * 30, color: colors[(Math.random() * colors.length) | 0], size: 2 + Math.random() * 3.4 });
+  }
+}
+function ring(x, y, color) { rings.push({ x, y, r: 6, life: 26, color }); }
+
+function dockSuccess() {
+  const ux = dock.x, uy = dock.y;
+  P.size++; P.reserve--;
+  P.grow = 26;
+  flashT = 12; shakeT = 16;
+  ring(P.x, P.y - 20, "#ffd76a"); ring(ux, uy, "#ffffff");
+  explode(ux, uy, 42, ["#ffd76a", "#ffffff", "#ff9a3c", UNIT_COLORS[P.size - 1]], 1.7);
+  score += 500 + Math.ceil(dockT / 60) * 50;
+  dock = null; phase = "dockwin"; dockWinT = 55;
+  if (P.size === 7) {
+    P.phoenixT = 1200; // フェニックス覚醒：20秒無敵
+    flashT = 16; shakeT = 20;
+    ring(P.x, P.y, "#ff9a3c"); ring(P.x, P.y, "#ffd76a");
+    explode(P.x, P.y - 10, 60, ["#ff9a3c", "#ff5a3c", "#ffd76a", "#ffffff"], 2);
+    banner = { text: "フェニックス覚醒！ 20秒無敵", t: 120 };
+  } else {
+    banner = { text: "DOCKING!! " + P.size + "機合体", t: 80 };
+  }
+}
+
+function hitPlayer() {
+  if (!P || P.inv > 0 || P.phoenixT > 0 || scene !== "play") return;
+  shakeT = 14; flashT = 6;
+  if (P.size > 1) {
+    const i = P.size - 1;
+    explode(P.x, sectionY(i), 18, ["#ffb35a", "#ff5a5a", "#ffffff"], 1.1);
+    ring(P.x, sectionY(i), "#ff9a3c");
+    // 剥がれた号機は壊れずに退避し、予備に戻る（次のドッキングで再合体できる）
+    parts.push({ x: P.x, y: sectionY(i), vx: (Math.random() < 0.5 ? -0.9 : 0.9), vy: -2.4, t: 0, life: 44, kind: "unit", idx: i, size: 3 });
+    P.size--; P.reserve++; P.inv = 110;
+    banner = { text: (i + 1) + "号機が退避 ― 次のドッキングで戻れる", t: 80 };
+  } else {
+    explode(P.x, P.y, 46, ["#ffb35a", "#ff5a5a", "#ffd76a", "#ffffff"], 1.9);
+    ring(P.x, P.y, "#ff5a5a");
+    if (P.reserve > 0) {
+      P.reserve--; P.size = 1; P.x = 450; P.y = 500; P.inv = 160;
+      banner = { text: "次の号機、出撃！ 残り" + (P.reserve + 1) + "機", t: 100 };
+    } else {
+      scene = "gameover";
+      if (score > hi) { hi = score; localStorage.setItem("sevendockHigh", hi); }
+    }
+  }
+}
+
+const FIRE_ANGLES = { 1: [0], 2: [-14, 14], 3: [-27, 0, 27], 4: [-40, -13, 13, 40], 5: [-52, -26, 0, 26, 52], 6: [-74, -45, -16, 16, 45, 74] };
+function tryFire() {
+  if (scene !== "play" || phase === "dock" || !P || P.cool > 0) return;
+  if (P.size >= 7) return; // フェニックスはレーザーのみ（update側で処理）
+  P.cool = 9;
+  const angs = FIRE_ANGLES[P.size] || [0];
+  for (let i = 0; i < angs.length; i++) {
+    const bx = P.x + (i - (angs.length - 1) / 2) * 18;
+    const a = angs[i] * Math.PI / 180;
+    bullets.push({ x: bx, y: noseY() - 4, vx: Math.sin(a) * 6.6, vy: -Math.cos(a) * 6.6 });
+    parts.push({ x: bx, y: noseY() - 8, vx: 0, vy: -0.6, t: 0, life: 7, color: "#ffe9a8", size: 2.6 });
+  }
+}
+
+function spawnEnemy(kind) {
+  const x = 70 + Math.random() * (W - 140);
+  if (kind === "saucer") enemies.push({ kind, x, y: -24, hp: 1, r: 14, t: Math.random() * 100 | 0, sc: 100, shootT: 140 + Math.random() * 140 });
+  else if (kind === "weaver") enemies.push({ kind, x, baseX: x, y: -24, hp: 1, r: 13, t: Math.random() * 100 | 0, sc: 150 });
+  else if (kind === "diver") enemies.push({ kind, x, y: -24, hp: 1, r: 12, t: 0, mode: "enter", vx: 0, vy: 0, sc: 200 });
+  else if (kind === "meteor") enemies.push({ kind, x, y: -30, hp: 3, r: 17 + Math.random() * 7, t: 0, sc: 150, rot: Math.random() * 6 });
+}
+
+function enemyShoot(e, ang, sp) {
+  ebullets.push({ x: e.x, y: e.y + 10, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp });
+}
+
+function damageBoss(d) {
+  if (!boss || bossDieT > 0) return;
+  boss.hp -= d; boss.flash = 4;
+  if (boss.hp <= 0) { bossDieT = 100; shakeT = 20; }
+}
+
+function waveCleared() { return phase === "battle" && !boss && bossDieT === 0 && spawnQ.length === 0 && enemies.length === 0; }
+
+function update() {
+  time++;
+  for (const s of stars) { s.y += s.s; if (s.y > H) { s.y = -2; s.x = Math.random() * W; } }
+  if (banner) { banner.t--; if (banner.t <= 0) banner = null; }
+  if (shakeT > 0) shakeT--;
+  if (flashT > 0) flashT--;
+  parts = parts.filter(p => ++p.t < p.life);
+  for (const p of parts) { p.x += p.vx; p.y += p.vy; }
+  rings = rings.filter(r => ++r.r > 0 && (r.r += 4.6) < 190 && r.life-- > 0);
+  if (scene !== "play" || !P) return;
+
+  if (P.inv > 0) P.inv--;
+  if (P.cool > 0) P.cool--;
+  if (P.grow > 0) P.grow--;
+  if (P.phoenixT > 0) P.phoenixT--;
+  laserOn = false;
+  // フェニックスの残り火
+  if (P.size === 7 && time % 2 === 0) {
+    parts.push({ x: P.x + (Math.random() - 0.5) * 90, y: P.y + 6 + Math.random() * 22, vx: (Math.random() - 0.5) * 0.6, vy: 1.2 + Math.random(), t: 0, life: 20 + Math.random() * 14, color: ["#ff9a3c", "#ff5a3c", "#ffd76a"][(Math.random() * 3) | 0], size: 2.6 + Math.random() * 2.6 });
+  }
+
+  // 移動
+  const sp = 3.4;
+  let dx = 0, dy = 0;
+  if (keys["arrowleft"] || keys["a"]) dx -= 1;
+  if (keys["arrowright"] || keys["d"]) dx += 1;
+  if (keys["arrowup"] || keys["w"]) dy -= 1;
+  if (keys["arrowdown"] || keys["s"]) dy += 1;
+  P.x = clamp(P.x + dx * sp, 34, W - 34);
+  const yMin = phase === "dock" || phase === "dockwin" ? 46 : 250;
+  P.y = clamp(P.y + dy * sp, yMin, H - 34);
+  if (keys[" "] || keys["z"]) tryFire();
+  // 機関の炎
+  if (time % 3 === 0) parts.push({ x: P.x + (Math.random() - 0.5) * (10 + P.size * 3), y: sectionY(P.size - 1) + 16, vx: 0, vy: 1.6, t: 0, life: 12, color: "#5aa2ff", size: 2.2 });
+
+  // 出現
+  if (phase === "battle" && spawnQ.length) {
+    if (--spawnT <= 0) { spawnEnemy(spawnQ.shift()); spawnT = Math.max(26, 62 - wave * 2); }
+  }
+
+  // ドッキング
+  if (phase === "dock" && dock) {
+    dock.t++;
+    if (dock.flee) { dock.y -= 4.2; if (dock.y < -50) { dock = null; startWave(); } }
+    else {
+      dock.x = 450 + Math.sin(dock.t * 0.021) * 265;
+      dock.y = 104 + Math.sin(dock.t * 0.05) * 8;
+      if (--dockT <= 0) {
+        if (dock.passes > 1) { // もう1周回ってくる
+          dock.passes--; dockT = 720; dock.t = 0;
+          banner = { text: "号機がもう一度来る！", t: 90 };
+        } else dock.flee = true;
+      }
+      else if (Math.hypot(P.x - dock.x, P.y - 24 - dock.y) < 44) dockSuccess();
+    }
+  }
+  if (phase === "dockwin") { if (--dockWinT <= 0) startWave(); }
+
+  // 自弾（方向つき）
+  bullets = bullets.filter(b => (b.x += b.vx, b.y += b.vy, b.y > -20 && b.x > -20 && b.x < W + 20));
+  for (const b of bullets) {
+    if (boss && bossDieT === 0 && Math.abs(b.x - boss.x) < 118 && Math.abs(b.y - boss.y) < 44) {
+      b.y = -999; damageBoss(1);
+      parts.push({ x: b.x, y: boss.y + 30, vx: 0, vy: 0.5, t: 0, life: 10, color: "#ffd76a", size: 2.4 });
+      continue;
+    }
+    for (const e of enemies) {
+      if (Math.abs(b.x - e.x) < e.r + 4 && Math.abs(b.y - e.y) < e.r + 6) {
+        b.y = -999; e.hp--;
+        if (e.hp <= 0) {
+          e.dead = true; score += e.sc;
+          explode(e.x, e.y, e.kind === "meteor" ? 26 : 15, ["#ffb35a", "#ff5a5a", "#ffe9a8"], e.kind === "meteor" ? 1.3 : 0.9);
+          if (e.kind === "meteor") ring(e.x, e.y, "#ff9a3c");
+        }
+        break;
+      }
+    }
+  }
+  bullets = bullets.filter(b => b.y > -70 && b.x > -70 && b.x < W + 70);
+  enemies = enemies.filter(e => !e.dead && e.y < H + 46 && e.x > -60 && e.x < W + 60);
+
+  // フェニックスの広範囲前方レーザー（7機合体時・射撃キー押しっぱなし）
+  if (P.size === 7 && phase === "battle" && (keys[" "] || keys["z"])) {
+    laserOn = true;
+    if (time % 2 === 0) parts.push({ x: P.x + (Math.random() - 0.5) * 44, y: Math.random() * noseY(), vx: 0, vy: -1.4, t: 0, life: 12, color: "#ffd76a", size: 2.4 });
+    if (time % 5 === 0) {
+      for (const e of enemies) {
+        if (!e.dead && Math.abs(e.x - P.x) < 44 && e.y < P.y - 30) {
+          e.hp--;
+          parts.push({ x: e.x, y: e.y, vx: 0, vy: 0.4, t: 0, life: 9, color: "#ffffff", size: 2.6 });
+          if (e.hp <= 0) { e.dead = true; score += e.sc; explode(e.x, e.y, 16, ["#ffb35a", "#ff5a3c", "#ffd76a"], 1.1); }
+        }
+      }
+      enemies = enemies.filter(e => !e.dead);
+      if (boss && bossDieT === 0 && Math.abs(boss.x - P.x) < 140 && boss.y < P.y - 30) {
+        damageBoss(1);
+        parts.push({ x: P.x + (Math.random() - 0.5) * 30, y: boss.y + 26, vx: 0, vy: 0.5, t: 0, life: 10, color: "#ffffff", size: 2.8 });
+      }
+    }
+  }
+
+  // 敵
+  const esp = 1 + wave * 0.02;
+  for (const e of enemies) {
+    e.t++;
+    if (e.kind === "saucer") {
+      e.y += 0.55 * esp; e.x += Math.sin(e.t * 0.03) * 0.5;
+      if (wave >= 2 && --e.shootT <= 0) { enemyShoot(e, Math.PI / 2 + (Math.random() - 0.5) * 0.5, 1.9); e.shootT = 190 + Math.random() * 120; }
+    } else if (e.kind === "weaver") {
+      e.y += 0.82 * esp; e.x = e.baseX + Math.sin(e.y * 0.02 + e.t * 0.01) * 74;
+    } else if (e.kind === "diver") {
+      if (e.mode === "enter") { e.y += 1.1; if (e.y > 92) { e.mode = "aim"; e.t = 0; } }
+      else if (e.mode === "aim") { if (e.t > 36) { const a = Math.atan2(P.y - e.y, P.x - e.x); e.vx = Math.cos(a) * 2.25; e.vy = Math.sin(a) * 2.25; e.mode = "dive"; } }
+      else { e.x += e.vx; e.y += e.vy; }
+    } else if (e.kind === "meteor") {
+      e.y += 1.05 * esp; e.rot += 0.02;
+    }
+    // 衝突（合体の各セクション）
+    if (P.inv === 0) {
+      for (let i = 0; i < P.size; i++) {
+        if (Math.hypot(e.x - P.x, e.y - sectionY(i)) < e.r + 15) { e.dead = true; explode(e.x, e.y, 14, ["#ffb35a", "#ff5a5a"], 1); hitPlayer(); break; }
+      }
+    }
+  }
+  enemies = enemies.filter(e => !e.dead && e.y < H + 46 && e.x > -60 && e.x < W + 60);
+
+  // ボス
+  if (boss) {
+    if (bossDieT > 0) {
+      bossDieT--;
+      if (bossDieT % 9 === 0) explode(boss.x + (Math.random() - 0.5) * 190, boss.y + (Math.random() - 0.5) * 50, 22, ["#ffb35a", "#ff5a5a", "#ffd76a", "#ffffff"], 1.5);
+      if (bossDieT === 0) {
+        explode(boss.x, boss.y, 70, ["#ffffff", "#ffd76a", "#ff9a3c", "#ff5a5a"], 2.2);
+        ring(boss.x, boss.y, "#ffd76a"); ring(boss.x, boss.y, "#ffffff");
+        flashT = 14; shakeT = 22; score += 5000;
+        boss = null;
+      }
+    } else {
+      boss.t++;
+      if (boss.flash > 0) boss.flash--;
+      boss.x += Math.sin(boss.t * 0.011) * 1.15;
+      boss.x = clamp(boss.x, 150, W - 150);
+      if (--boss.shootT <= 0) {
+        for (const da of [-0.32, 0, 0.32]) enemyShoot(boss, Math.PI / 2 + da, 2.05);
+        boss.shootT = Math.max(56, 96 - wave * 2);
+      }
+      if (--boss.spawnT <= 0) {
+        if (enemies.length < 3) { const s = { kind: "saucer", x: boss.x, y: boss.y + 34, hp: 1, r: 14, t: 0, sc: 100, shootT: 200 }; enemies.push(s); }
+        boss.spawnT = 300;
+      }
+      if (P.inv === 0 && Math.abs(P.x - boss.x) < 118 && Math.abs(P.y - boss.y) < 48) hitPlayer();
+    }
+  }
+
+  // 敵弾
+  ebullets = ebullets.filter(b => (b.x += b.vx, b.y += b.vy, b.y < H + 14 && b.y > -14 && b.x > -14 && b.x < W + 14));
+  if (P.inv === 0) {
+    for (const b of ebullets) {
+      let hit = false;
+      for (let i = 0; i < P.size; i++) if (Math.hypot(b.x - P.x, b.y - sectionY(i)) < 15) { hit = true; break; }
+      if (hit) { b.y = H + 99; hitPlayer(); if (scene !== "play") break; }
+    }
+    ebullets = ebullets.filter(b => b.y < H + 40);
+  }
+
+  // ウェーブクリア判定
+  if (waveCleared()) {
+    if (P.reserve > 0 && P.size < 7) startDock();
+    else startWave();
+  }
+}
+
+// ---------- 描画 ----------
+function drawShipUnit(cx, cy, idx, total, invFlash) {
+  const wdt = 30 + idx * 7, hgt = 24;
+  ctx.save(); ctx.translate(cx, cy);
+  if (invFlash) ctx.globalAlpha = 0.35;
+  ctx.fillStyle = "#2b3550";
+  ctx.fillRect(-wdt / 2 - 8, 2, 8, 10); ctx.fillRect(wdt / 2, 2, 8, 10); // 翼
+  const grad = ctx.createLinearGradient(0, -hgt / 2, 0, hgt / 2);
+  grad.addColorStop(0, "#aebadd"); grad.addColorStop(0.5, "#5f6f9e"); grad.addColorStop(1, "#39466e");
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(0, -hgt / 2 - (idx === 0 ? 9 : 0));
+  ctx.lineTo(wdt / 2, -hgt / 2 + 5); ctx.lineTo(wdt / 2, hgt / 2); ctx.lineTo(-wdt / 2, hgt / 2); ctx.lineTo(-wdt / 2, -hgt / 2 + 5);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = UNIT_COLORS[idx % UNIT_COLORS.length];
+  ctx.fillRect(-wdt / 2, 2, wdt, 5);
+  ctx.fillStyle = "#bfe8ff";
+  ctx.beginPath(); ctx.arc(0, -3, 4.4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#ffd76a";
+  ctx.fillRect(-wdt / 2 - 2, -8, 3.4, 8); ctx.fillRect(wdt / 2 - 1.4, -8, 3.4, 8); // 砲門
+  ctx.restore();
+}
+
+function drawPhoenix(x, y, invFlash) {
+  const flap = Math.sin(time * 0.24) * 7;
+  ctx.save(); ctx.translate(x, y);
+  if (invFlash) ctx.globalAlpha = 0.4;
+  // 尾の炎
+  for (let i = -2; i <= 2; i++) {
+    ctx.fillStyle = i % 2 ? "#ff5a3c" : "#ff9a3c";
+    ctx.beginPath();
+    ctx.moveTo(i * 9 - 4, 14); ctx.lineTo(i * 13, 44 + Math.sin(time * 0.3 + i) * 5); ctx.lineTo(i * 9 + 5, 14);
+    ctx.closePath(); ctx.fill();
+  }
+  // 翼（炎）
+  for (const s of [-1, 1]) {
+    const g = ctx.createLinearGradient(0, 0, s * 86, -20);
+    g.addColorStop(0, "#ffd76a"); g.addColorStop(0.55, "#ff9a3c"); g.addColorStop(1, "#ff5a3c");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(s * 8, -2);
+    ctx.quadraticCurveTo(s * 52, -26 - flap, s * 88, -12 - flap * 1.6);
+    ctx.quadraticCurveTo(s * 58, -2, s * 74, 10 - flap * 0.6);
+    ctx.quadraticCurveTo(s * 44, 6, s * 30, 14);
+    ctx.closePath(); ctx.fill();
+  }
+  // 体
+  const bg = ctx.createLinearGradient(0, -26, 0, 20);
+  bg.addColorStop(0, "#ffe9a8"); bg.addColorStop(0.5, "#ffb35a"); bg.addColorStop(1, "#ff7a3c");
+  ctx.fillStyle = bg;
+  ctx.beginPath(); ctx.ellipse(0, 0, 17, 25, 0, 0, Math.PI * 2); ctx.fill();
+  // 頭とくちばし
+  ctx.fillStyle = "#ffd76a";
+  ctx.beginPath(); ctx.arc(0, -26, 10.5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#ff5a3c";
+  ctx.beginPath(); ctx.moveTo(-4, -30); ctx.lineTo(0, -42); ctx.lineTo(4, -30); ctx.closePath(); ctx.fill(); // とさか
+  ctx.beginPath(); ctx.moveTo(-3, -24); ctx.lineTo(3, -24); ctx.lineTo(0, -16); ctx.closePath(); ctx.fill(); // くちばし
+  ctx.fillStyle = "#40240a";
+  ctx.beginPath(); ctx.arc(-4, -27, 1.7, 0, Math.PI * 2); ctx.arc(4, -27, 1.7, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+}
+
+function drawPlayer() {
+  if (!P) return;
+  const invFlash = P.inv > 0 && (time >> 2) % 2 === 0;
+  const growScale = P.grow > 0 ? 1 + Math.sin(P.grow / 26 * Math.PI) * 0.13 : 1;
+  ctx.save();
+  ctx.translate(P.x, P.y); ctx.scale(growScale, growScale); ctx.translate(-P.x, -P.y);
+  if (P.size === 7) drawPhoenix(P.x, P.y, invFlash);
+  else for (let i = P.size - 1; i >= 0; i--) drawShipUnit(P.x, sectionY(i), i, P.size, invFlash);
+  ctx.restore();
+  if (P.phoenixT > 0) { // 無敵オーラ
+    ctx.strokeStyle = "rgba(255,183,46," + (0.55 + Math.sin(time * 0.2) * 0.25) + ")"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(P.x, P.y, 62 + Math.sin(time * 0.16) * 5, 0, Math.PI * 2); ctx.stroke();
+  }
+  if (phase === "dock") {
+    ctx.strokeStyle = "rgba(255,215,106,.75)"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(P.x, P.y - 24, 30 + Math.sin(time * 0.2) * 3, 0, Math.PI * 2); ctx.stroke();
+  }
+}
+
+function drawLaser() {
+  if (!laserOn || !P) return;
+  const top = 0, bottom = P.y - 34;
+  const flick = Math.sin(time * 1.7) * 3;
+  const g = ctx.createLinearGradient(P.x - 26, 0, P.x + 26, 0);
+  g.addColorStop(0, "rgba(255,90,60,0)");
+  g.addColorStop(0.25, "rgba(255,120,50,.55)");
+  g.addColorStop(0.5, "rgba(255,215,106,.9)");
+  g.addColorStop(0.75, "rgba(255,120,50,.55)");
+  g.addColorStop(1, "rgba(255,90,60,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(P.x - 26 + flick * 0.3, top, 52, bottom - top);
+  ctx.fillStyle = "rgba(255,255,255,.92)";
+  ctx.fillRect(P.x - 6 + flick * 0.2, top, 12, bottom - top);
+  ctx.fillStyle = "#ffd76a";
+  ctx.beginPath(); ctx.arc(P.x, bottom, 13 + Math.sin(time * 0.9) * 2.4, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawDockUnit() {
+  if (!dock) return;
+  const idx = P ? P.size : 0;
+  drawShipUnit(dock.x, dock.y, idx, idx + 1, false);
+  ctx.fillStyle = "#ffd76a"; ctx.font = "bold 13px sans-serif"; ctx.textAlign = "center";
+  ctx.fillText((idx + 1) + "号機", dock.x, dock.y - 30);
+  ctx.strokeStyle = "rgba(255,215,106,.5)";
+  ctx.beginPath(); ctx.arc(dock.x, dock.y, 34 + Math.sin(time * 0.15) * 3, 0, Math.PI * 2); ctx.stroke();
+}
+
+function drawEnemy(e) {
+  ctx.save(); ctx.translate(e.x, e.y);
+  if (e.kind === "saucer") {
+    ctx.fillStyle = "#8a93b8"; ctx.beginPath(); ctx.ellipse(0, 2, 17, 7, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#c95a7a"; ctx.beginPath(); ctx.arc(0, -3, 8, Math.PI, 0); ctx.fill();
+    ctx.fillStyle = "#ffe9a8"; ctx.fillRect(-12, 1, 4, 3); ctx.fillRect(8, 1, 4, 3);
+  } else if (e.kind === "weaver") {
+    ctx.fillStyle = "#7a5ac9"; ctx.beginPath(); ctx.moveTo(0, 13); ctx.lineTo(12, -8); ctx.lineTo(0, -3); ctx.lineTo(-12, -8); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#e8d8ff"; ctx.beginPath(); ctx.arc(0, 1, 3.4, 0, Math.PI * 2); ctx.fill();
+  } else if (e.kind === "diver") {
+    ctx.fillStyle = e.mode === "aim" && (time >> 2) % 2 ? "#ffffff" : "#ff7a5a";
+    ctx.beginPath(); ctx.moveTo(0, 14); ctx.lineTo(10, -9); ctx.lineTo(-10, -9); ctx.closePath(); ctx.fill();
+  } else if (e.kind === "meteor") {
+    ctx.rotate(e.rot);
+    ctx.fillStyle = "#7a6a58";
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) { const a = i / 8 * Math.PI * 2, rr = e.r * (0.78 + ((i * 37) % 10) / 34); ctx[i ? "lineTo" : "moveTo"](Math.cos(a) * rr, Math.sin(a) * rr); }
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#99876e"; ctx.beginPath(); ctx.arc(-4, -3, e.r * 0.34, 0, Math.PI * 2); ctx.fill();
+    if (e.hp < 3) { ctx.strokeStyle = "#3c3428"; ctx.beginPath(); ctx.moveTo(-8, 6); ctx.lineTo(2, -2); ctx.lineTo(9, 5); ctx.stroke(); }
+  }
+  ctx.restore();
+}
+
+function drawBoss() {
+  if (!boss) return;
+  const b = boss;
+  ctx.save(); ctx.translate(b.x, b.y);
+  if (b.flash > 0) { ctx.shadowColor = "#ffffff"; ctx.shadowBlur = 24; }
+  const grad = ctx.createLinearGradient(0, -44, 0, 40);
+  grad.addColorStop(0, "#6e3a4d"); grad.addColorStop(0.55, "#93354f"); grad.addColorStop(1, "#4d2438");
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.ellipse(0, 8, 118, 34, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#c95a7a"; ctx.beginPath(); ctx.arc(0, -12, 42, Math.PI, 0); ctx.fill();
+  ctx.fillStyle = "#ffd76a";
+  for (let i = -4; i <= 4; i++) { ctx.beginPath(); ctx.arc(i * 24, 12, 4, 0, Math.PI * 2); ctx.fill(); }
+  ctx.fillStyle = "#ffe9a8"; ctx.fillRect(-6, 34, 12, 10);
+  ctx.restore();
+  // HPバー
+  ctx.fillStyle = "rgba(255,255,255,.22)"; ctx.fillRect(W / 2 - 220, 10, 440, 11);
+  ctx.fillStyle = "#ff5a7a"; ctx.fillRect(W / 2 - 220, 10, 440 * Math.max(0, b.hp) / b.maxhp, 11);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 11px sans-serif"; ctx.textAlign = "center";
+  ctx.fillText("BOSS", W / 2, 33);
+}
+
+function draw() {
+  ctx.save();
+  if (shakeT > 0) ctx.translate((Math.random() - 0.5) * shakeT * 0.7, (Math.random() - 0.5) * shakeT * 0.7);
+  ctx.fillStyle = "#04040c"; ctx.fillRect(-24, -24, W + 48, H + 48);
+  ctx.fillStyle = "#cfd8ff";
+  for (const s of stars) ctx.fillRect(s.x, s.y, 2, 2);
+  for (const e of enemies) drawEnemy(e);
+  drawBoss();
+  drawDockUnit();
+  if (scene !== "gameover") drawPlayer();
+  drawLaser();
+  ctx.fillStyle = "#ffe9a8";
+  for (const b of bullets) ctx.fillRect(b.x - 2, b.y - 9, 4, 11);
+  ctx.fillStyle = "#ff8ab0";
+  for (const b of ebullets) { ctx.beginPath(); ctx.arc(b.x, b.y, 4.4, 0, Math.PI * 2); ctx.fill(); }
+  for (const p of parts) {
+    ctx.globalAlpha = 1 - p.t / p.life;
+    if (p.kind === "unit") { // 退避する号機
+      ctx.save(); ctx.translate(p.x, p.y); ctx.scale(0.72, 0.72); ctx.translate(-p.x, -p.y);
+      drawShipUnit(p.x, p.y, p.idx, p.idx + 1, false);
+      ctx.restore();
+      continue;
+    }
+    ctx.fillStyle = p.color; ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+  for (const r of rings) {
+    ctx.globalAlpha = Math.max(0, r.life / 26) * 0.8;
+    ctx.strokeStyle = r.color; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(r.x, r.y, r.r, 0, Math.PI * 2); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+  if (flashT > 0) { ctx.fillStyle = "rgba(255,255,255," + (flashT / 14 * 0.55) + ")"; ctx.fillRect(0, 0, W, H); }
+
+  // HUD
+  ctx.fillStyle = "#e8e8f2"; ctx.font = "bold 15px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("SCORE " + score, 12, 22);
+  ctx.fillStyle = "#9aa3c7"; ctx.font = "12px sans-serif";
+  ctx.fillText("HI " + hi, 12, 40);
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#e8e8f2"; ctx.font = "bold 15px sans-serif";
+  if (P) ctx.fillText("WAVE " + wave + "　合体 " + P.size + "機 / 残り" + (P.size + P.reserve) + "機", W - 12, 22);
+  if (phase === "dock") {
+    ctx.fillStyle = "#ffd76a"; ctx.font = "bold 16px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("ドッキングまで " + Math.ceil(dockT / 60) + "秒 ― 号機に体を重ねよう" + (dock && dock.passes > 1 ? "（逃してももう1周来る）" : "（ラストチャンス）"), W / 2, 52);
+  }
+  if (P && P.size === 7) {
+    ctx.textAlign = "center"; ctx.font = "bold 15px sans-serif";
+    if (P.phoenixT > 0) { ctx.fillStyle = "#ffb52e"; ctx.fillText("フェニックス無敵 あと" + Math.ceil(P.phoenixT / 60) + "秒", W / 2, 52); }
+    else { ctx.fillStyle = "#ff9a3c"; ctx.fillText("フェニックス形態 ― レーザー発射中は無防備", W / 2, 52); }
+  }
+  if (banner) {
+    ctx.fillStyle = "rgba(255,215,106," + Math.min(1, banner.t / 40) + ")";
+    ctx.font = "bold 30px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(banner.text, W / 2, 150);
+  }
+
+  if (scene === "title") {
+    ctx.fillStyle = "rgba(2,2,10,.78)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#ffd76a"; ctx.font = "bold 44px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("セブンドック", W / 2, 168);
+    ctx.fillStyle = "#e8e8f2"; ctx.font = "17px sans-serif";
+    ctx.fillText("ドッキングで巨大化するシューティング", W / 2, 206);
+    ctx.font = "15px sans-serif"; ctx.fillStyle = "#c9cdea";
+    ctx.fillText("ウェーブを片付けると、次の号機とドッキングできる", W / 2, 262);
+    ctx.fillText("合体するほど機体は巨大に、弾は斜めや横にも広がる（最大7機）", W / 2, 290);
+    ctx.fillText("被弾すると合体が1機ずつ剥がれる（剥がれた号機は予備に戻り、再合体できる）", W / 2, 318);
+    ctx.fillText("7機合体で火の鳥フェニックスに変身（20秒無敵→広範囲レーザー）", W / 2, 346);
+    ctx.fillText("4ウェーブごとに巨大ボスが出現", W / 2, 374);
+    ctx.fillStyle = "#ffd76a"; ctx.font = "bold 19px sans-serif";
+    ctx.fillText("クリックかスペースでスタート", W / 2, 420);
+    ctx.fillStyle = "#9aa3c7"; ctx.font = "13px sans-serif";
+    ctx.fillText("移動：矢印キー／WASD　射撃：スペース／Z", W / 2, 452);
+  }
+  if (scene === "gameover") {
+    ctx.fillStyle = "rgba(2,2,10,.72)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#ff5a5a"; ctx.font = "bold 42px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("GAME OVER", W / 2, 240);
+    ctx.fillStyle = "#e8e8f2"; ctx.font = "19px sans-serif";
+    ctx.fillText("SCORE " + score + "　到達 WAVE " + wave, W / 2, 292);
+    ctx.fillStyle = "#ffd76a"; ctx.font = "bold 17px sans-serif";
+    ctx.fillText("クリックかスペースでもう一度", W / 2, 348);
+  }
+}
+
+function loop() { update(); draw(); requestAnimationFrame(loop); }
+loop();
+
+// テスト・自動確認用フック
+window.__SD = {
+  state: () => ({ scene, phase, wave, score, hi, size: P ? P.size : 0, reserve: P ? P.reserve : 0, x: P ? Math.round(P.x) : 0, y: P ? Math.round(P.y) : 0, inv: P ? P.inv : 0, phoenixT: P ? P.phoenixT : 0, laserOn, enemies: enemies.length, bullets: bullets.length, ebullets: ebullets.length, boss: boss ? { hp: boss.hp, maxhp: boss.maxhp } : null, dock: dock ? { x: Math.round(dock.x), y: Math.round(dock.y), passes: dock.passes } : null, dockT }),
+  start: () => newGame(),
+  tick: n => { for (let i = 0; i < n; i++) update(); },
+  key: (k, d) => { keys[k] = d; },
+  action: () => tryFire(),
+  setPos: (x, y) => { if (P) { P.x = x; P.y = y; } },
+  setInv: v => { if (P) P.inv = v; },
+  setSize: v => { if (P) P.size = v; },
+  setReserve: v => { if (P) P.reserve = v; },
+  enemyAt: (kind, x, y) => { spawnEnemy(kind); const e = enemies[enemies.length - 1]; e.x = x; e.y = y; if (kind === "diver") { e.mode = "aim"; e.t = 0; } return e; },
+  clearField: () => { enemies = []; ebullets = []; spawnQ = []; },
+  clearBullets: () => { ebullets = []; },
+  setBossHp: v => { if (boss) boss.hp = v; },
+  dockPos: () => dock ? { x: dock.x, y: dock.y } : null,
+  bulletVec: () => bullets.map(b => ({ vx: Math.round(b.vx * 10) / 10, vy: Math.round(b.vy * 10) / 10 })),
+  setPhoenixT: v => { if (P) P.phoenixT = v; },
+};
+</script>
+</body>
+</html>
