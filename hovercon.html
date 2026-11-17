@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ホバーコネクション | NAWOMIDOUゲーム館</title>
+<style>
+  body { margin:0; background:#101018; color:#eceaf4; font-family:"Hiragino Kaku Gothic ProN","Yu Gothic",sans-serif; text-align:center; }
+  .wrap { max-width:940px; margin:0 auto; padding:16px 10px 28px; }
+  h1 { font-size:22px; margin:6px 0 2px; }
+  p.sub { color:#9aa3c7; font-size:13px; margin:2px 0 10px; }
+  canvas { background:#1a2340; border:2px solid #39406e; border-radius:8px; max-width:100%; height:auto; }
+  .howto { text-align:left; max-width:880px; margin:14px auto 0; font-size:14px; line-height:1.75; color:#c9cdea; }
+  .howto b { color:#ffd76a; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ホバーコネクション</h1>
+  <p class="sub">空を浮けるホバーカーで街の道路を走り尽くす、シティコネクション風アクション</p>
+  <canvas id="cv" width="900" height="600"></canvas>
+  <div class="howto">
+    <p><b>遊び方：</b>←→／ADで移動、スペース／↑でジャンプ、<b>X長押しでホバー上昇</b>（ゲージ制。地面にいると回復）。街の全部の道路を走り尽くすとクリア。道路が塗れるのは低空走行のときだけです。パトカーと猫に当たるとクラッシュ。オイル缶を拾い、Zで投げるとパトカーをスピンさせられます。</p>
+  </div>
+</div>
+<script>
+"use strict";
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const W = 900, H = 600;
+const WORLD_W = 2160;
+const LEVELS = [520, 404, 288, 172];
+const CAR_W = 46, CAR_H = 22;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+let scene = "title"; // title / play / gameover
+let time = 0, score = 0;
+let hi = +(localStorage.getItem("hoverconHigh") || 0);
+let stage = 1, lives = 3;
+let car = null, segs = [], police = [], cats = [], cans = [], shots = [], parts = [];
+let totalTiles = 0, coveredCount = 0;
+let camX = 0, catT = 500, clearT = 0, banner = null;
+const keys = {};
+
+const CITIES = [
+  { name: "東京", skyTop: "#274b8f", skyBot: "#e8906a", far: "#1d2c52", land: "#31456f" },
+  { name: "ニューヨーク", skyTop: "#1d2a52", skyBot: "#7a86c9", far: "#141d3d", land: "#26355f" },
+  { name: "ロンドン", skyTop: "#3c4a6e", skyBot: "#b8b4a4", far: "#232c47", land: "#37436a" },
+  { name: "パリ", skyTop: "#5a3a6e", skyBot: "#f2a65a", far: "#2c2145", land: "#463363" },
+];
+const LAYOUTS = [
+  { segs: [[0,0,2160],[1,0,700],[1,900,620],[1,1720,440],[2,180,720],[2,1180,720],[3,480,620],[3,1380,620]],
+    police: [[1,1.2],[4,1.3]], oils: [[5,1500],[7,1650],[0,1950]] },
+  { segs: [[0,0,2160],[1,120,560],[1,860,560],[1,1560,600],[2,0,520],[2,700,640],[2,1520,640],[3,300,560],[3,1240,560]],
+    police: [[2,1.4],[5,1.4],[7,1.2]], oils: [[6,1750],[8,1450],[0,300]] },
+  { segs: [[0,0,2160],[1,0,520],[1,640,520],[1,1280,520],[1,1900,260],[2,240,600],[2,1080,600],[2,1800,360],[3,560,480],[3,1320,480]],
+    police: [[1,1.5],[6,1.5],[8,1.3]], oils: [[7,1950],[9,1500],[0,1500]] },
+  { segs: [[0,0,2160],[1,200,480],[1,880,480],[1,1560,480],[2,0,640],[2,760,640],[2,1520,640],[3,420,520],[3,1220,520]],
+    police: [[1,1.6],[4,1.6],[7,1.4],[0,1.2]], oils: [[5,1050],[8,1400],[2,1050]] },
+];
+
+addEventListener("keydown", e => {
+  const k = e.key.toLowerCase();
+  keys[k] = true;
+  if (["arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(k)) e.preventDefault();
+  if ((k === " " || k === "enter")) {
+    if (scene === "title" || scene === "gameover") newGame();
+    else if (k === " ") tryJump();
+  }
+  if (k === "arrowup" || k === "w") { if (scene === "play") tryJump(); }
+  if (k === "z") { if (scene === "play") throwOil(); }
+});
+addEventListener("keyup", e => { keys[e.key.toLowerCase()] = false; });
+cv.addEventListener("pointerdown", () => { if (scene === "title" || scene === "gameover") newGame(); });
+
+function cityIdx() { return (stage - 1) % 4; }
+function speedMul() { return 1 + 0.12 * Math.floor((stage - 1) / 4); }
+
+function loadStage(n) {
+  const L = LAYOUTS[(n - 1) % 4];
+  segs = L.segs.map(([lv, x, w]) => {
+    const tiles = new Uint8Array(Math.ceil(w / 30));
+    return { lv, x, w, y: LEVELS[lv], tiles, covered: 0 };
+  });
+  totalTiles = segs.reduce((a, s) => a + s.tiles.length, 0);
+  coveredCount = 0;
+  const mul = speedMul();
+  police = L.police.map(([si, sp]) => {
+    const s = segs[si];
+    return { seg: s, x: s.x + s.w / 2, minX: s.x + 30, maxX: s.x + s.w - 30, dir: 1, speed: sp * mul, spinT: 0, y: s.y - 24 };
+  });
+  cans = L.oils.map(([si, x]) => ({ seg: segs[si], x, y: segs[si].y - 14, taken: false }));
+  cats = []; shots = []; parts = [];
+  catT = 500; clearT = 0;
+  car = { x: 90, y: LEVELS[0] - CAR_H, vx: 0, vy: 0, face: 1, grounded: true, gseg: segs[0], gauge: 100, oil: 0, inv: 90, hovering: false };
+  camX = 0;
+  banner = { text: "STAGE " + n + " ― " + CITIES[cityIdx()].name, t: 130 };
+}
+
+function newGame() {
+  score = 0; lives = 3; stage = 1;
+  scene = "play";
+  loadStage(1);
+}
+
+function explode(x, y, n, colors) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, sp = 0.5 + Math.random() * 2;
+    parts.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 0.5, t: 0, life: 24 + Math.random() * 22, color: colors[(Math.random() * colors.length) | 0], size: 2 + Math.random() * 3 });
+  }
+}
+
+function tryJump() {
+  if (!car || scene !== "play" || clearT > 0) return;
+  if (car.grounded) { car.vy = -9.6; car.grounded = false; car.gseg = null; }
+}
+
+function throwOil() {
+  if (!car || scene !== "play" || car.oil <= 0 || clearT > 0) return;
+  car.oil--;
+  shots.push({ x: car.x + car.face * 24, y: car.y + 2, vx: car.face * 3.4, vy: -3.4 });
+}
+
+function coverTiles(seg, x0, x1) {
+  const i0 = clamp(Math.floor((x0 - seg.x) / 30), 0, seg.tiles.length - 1);
+  const i1 = clamp(Math.floor((x1 - seg.x) / 30), 0, seg.tiles.length - 1);
+  for (let i = i0; i <= i1; i++) {
+    if (!seg.tiles[i]) {
+      seg.tiles[i] = 1; seg.covered++; coveredCount++; score += 10;
+      if (coveredCount % 12 === 0) parts.push({ x: seg.x + i * 30 + 15, y: seg.y - 4, vx: 0, vy: -0.7, t: 0, life: 16, color: "#7ae8ff", size: 2.4 });
+    }
+  }
+}
+
+function crash() {
+  if (!car || car.inv > 0 || clearT > 0) return;
+  explode(car.x, car.y + 8, 34, ["#ffb35a", "#ff5a5a", "#ffd76a", "#ffffff"]);
+  lives--;
+  if (lives < 0) {
+    scene = "gameover";
+    if (score > hi) { hi = score; localStorage.setItem("hoverconHigh", hi); }
+  } else {
+    car.x = 90; car.y = LEVELS[0] - CAR_H; car.vx = 0; car.vy = 0; car.gauge = 100; car.inv = 160; car.grounded = true; car.gseg = segs[0];
+    banner = { text: "クラッシュ！ 残り" + lives + "台", t: 100 };
+  }
+}
+
+function segUnder(x0, x1) {
+  for (const s of segs) if (x1 > s.x && x0 < s.x + s.w) return s;
+  return null;
+}
+
+function update() {
+  time++;
+  if (banner) { banner.t--; if (banner.t <= 0) banner = null; }
+  parts = parts.filter(p => ++p.t < p.life);
+  for (const p of parts) { p.x += p.vx; p.y += p.vy; }
+  if (scene !== "play" || !car) return;
+
+  if (clearT > 0) {
+    clearT--;
+    if (clearT === 0) { stage++; loadStage(stage); }
+    return;
+  }
+  if (car.inv > 0) car.inv--;
+
+  // 横移動
+  const ACC = 0.22, MAXS = 3.0;
+  if (keys["arrowleft"] || keys["a"]) { car.vx -= ACC; car.face = -1; }
+  if (keys["arrowright"] || keys["d"]) { car.vx += ACC; car.face = 1; }
+  if (!keys["arrowleft"] && !keys["a"] && !keys["arrowright"] && !keys["d"]) car.vx *= 0.86;
+  car.vx = clamp(car.vx, -MAXS, MAXS);
+  car.x = clamp(car.x + car.vx, CAR_W / 2 + 4, WORLD_W - CAR_W / 2 - 4);
+
+  // 縦移動（ホバー／重力）
+  const hoverKey = keys["x"] || keys["shift"];
+  car.hovering = false;
+  if (hoverKey && car.gauge > 0) {
+    car.vy = -2.3; car.gauge = Math.max(0, car.gauge - 100 / 170); car.hovering = true; car.grounded = false; car.gseg = null;
+    if (time % 3 === 0) parts.push({ x: car.x + (Math.random() - 0.5) * 30, y: car.y + CAR_H + 4, vx: 0, vy: 1.1, t: 0, life: 13, color: "#7ae8ff", size: 2.2 });
+  } else {
+    car.vy = Math.min(car.vy + 0.34, 4.6);
+  }
+  const prevBottom = car.y + CAR_H;
+  car.y += car.vy;
+  let landed = null;
+  if (car.vy >= 0) {
+    for (const s of segs) {
+      if (car.x + CAR_W / 2 - 6 > s.x && car.x - CAR_W / 2 + 6 < s.x + s.w) {
+        if (prevBottom <= s.y + 0.5 && car.y + CAR_H >= s.y) { landed = s; break; }
+      }
+    }
+  }
+  if (landed) { car.y = landed.y - CAR_H; car.vy = 0; car.grounded = true; car.gseg = landed; }
+  else if (car.vy !== 0) { car.grounded = false; car.gseg = null; }
+  if (car.y > H + 80) { car.inv = 0; crash(); if (scene === "play") { car.y = LEVELS[0] - CAR_H; } }
+  if (car.grounded) car.gauge = Math.min(100, car.gauge + 1.1);
+
+  // 道路を塗る（接地 or 低空すれすれ）
+  const bottom = car.y + CAR_H;
+  if (car.grounded && car.gseg) coverTiles(car.gseg, car.x - CAR_W / 2, car.x + CAR_W / 2);
+  else if (car.vy > -1) {
+    for (const s of segs) {
+      const gap = s.y - bottom;
+      if (gap >= 0 && gap <= 14 && car.x + CAR_W / 2 - 6 > s.x && car.x - CAR_W / 2 + 6 < s.x + s.w) { coverTiles(s, car.x - CAR_W / 2, car.x + CAR_W / 2); break; }
+    }
+  }
+
+  // オイル缶の回収
+  for (const c of cans) {
+    if (!c.taken && Math.abs(car.x - c.x) < 36 && Math.abs(bottom - c.seg.y) < 8) {
+      c.taken = true; car.oil = Math.min(3, car.oil + 1); score += 50;
+      parts.push({ x: c.x, y: c.y - 8, vx: 0, vy: -0.8, t: 0, life: 18, color: "#ffd76a", size: 2.6 });
+    }
+  }
+
+  // パトカー
+  for (const p of police) {
+    if (p.spinT > 0) { p.spinT--; continue; }
+    p.x += p.dir * p.speed;
+    if (p.x < p.minX) { p.x = p.minX; p.dir = 1; }
+    if (p.x > p.maxX) { p.x = p.maxX; p.dir = -1; }
+    if (car.inv === 0 && Math.abs(p.x - car.x) < 46 && Math.abs((p.y + 12) - (car.y + 11)) < 28) crash();
+  }
+
+  // 猫
+  if (--catT <= 0) {
+    const s = segs[1 + (Math.random() * (segs.length - 1)) | 0];
+    const fromLeft = Math.random() < 0.5;
+    cats.push({ seg: s, x: fromLeft ? s.x + 14 : s.x + s.w - 14, dir: fromLeft ? 1 : -1, y: s.y - 15, t: 0 });
+    catT = 620 + Math.random() * 380;
+  }
+  for (const c of cats) { c.t++; c.x += c.dir * 0.7; }
+  cats = cats.filter(c => c.x > c.seg.x - 20 && c.x < c.seg.x + c.seg.w + 20);
+  if (car.inv === 0) for (const c of cats) {
+    if (Math.abs(c.x - car.x) < 36 && Math.abs((c.y + 7) - (car.y + 11)) < 22) { crash(); break; }
+  }
+
+  // オイル投げ
+  for (const s of shots) {
+    s.x += s.vx; s.vy += 0.3; s.y += s.vy;
+    for (const p of police) {
+      if (p.spinT === 0 && Math.abs(p.x - s.x) < 32 && Math.abs((p.y + 12) - s.y) < 26) {
+        p.spinT = 320; s.y = 9999; score += 300;
+        explode(p.x, p.y + 8, 16, ["#ffd76a", "#ffffff", "#7ae8ff"]);
+      }
+    }
+    if (s.y > LEVELS[0] + 30) s.y = 9999;
+  }
+  shots = shots.filter(s => s.y < 900 && s.x > -30 && s.x < WORLD_W + 30);
+
+  // カメラ
+  camX = clamp(car.x - W / 2, 0, WORLD_W - W);
+
+  // クリア判定
+  if (coveredCount >= totalTiles && totalTiles > 0) {
+    score += 1000;
+    clearT = 110;
+    banner = { text: "STAGE CLEAR! +1000", t: 110 };
+    explode(car.x, car.y, 40, ["#7ae8ff", "#ffd76a", "#ffffff"]);
+  }
+}
+
+// ---------- 描画 ----------
+function drawLandmark(idx, sx) {
+  ctx.save(); ctx.translate(sx, 520);
+  ctx.fillStyle = CITIES[idx].land;
+  if (idx === 0) { // 東京：タワー
+    ctx.beginPath();
+    ctx.moveTo(-52, 0); ctx.lineTo(-10, -300); ctx.lineTo(-4, -348); ctx.lineTo(0, -348); ctx.lineTo(4, -300); ctx.lineTo(10, -300); ctx.lineTo(52, 0); ctx.lineTo(26, 0); ctx.lineTo(6, -190); ctx.lineTo(-6, -190); ctx.lineTo(-26, 0);
+    ctx.closePath(); ctx.fill();
+    ctx.fillRect(-30, -196, 60, 10); ctx.fillRect(-17, -292, 34, 9);
+    ctx.fillRect(-1.6, -392, 3.2, 46);
+  } else if (idx === 1) { // ニューヨーク：女神像ふう
+    ctx.fillRect(-46, -64, 92, 64);
+    ctx.fillRect(-30, -84, 60, 20);
+    ctx.beginPath(); // 衣のすそ〜体
+    ctx.moveTo(-20, -84); ctx.lineTo(-9, -196); ctx.lineTo(9, -196); ctx.lineTo(20, -84);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.arc(0, -208, 12, 0, Math.PI * 2); ctx.fill(); // 頭
+    for (let i = -3; i <= 3; i++) { // 王冠のとげ
+      const a = -Math.PI / 2 + i * 0.3;
+      ctx.beginPath(); ctx.moveTo(Math.cos(a) * 8, -208 + Math.sin(a) * 8); ctx.lineTo(Math.cos(a) * 21, -208 + Math.sin(a) * 21); ctx.lineTo(Math.cos(a + 0.14) * 8, -208 + Math.sin(a + 0.14) * 8); ctx.closePath(); ctx.fill();
+    }
+    ctx.save(); ctx.rotate(-0.5); ctx.fillRect(14, -252, 7, 52); ctx.restore(); // 右腕
+    ctx.fillRect(17, -262, 12, 12); // 松明
+  } else if (idx === 2) { // ロンドン：時計塔
+    ctx.fillRect(-24, -300, 48, 300);
+    ctx.beginPath(); ctx.moveTo(-30, -300); ctx.lineTo(0, -356); ctx.lineTo(30, -300); ctx.closePath(); ctx.fill();
+    ctx.fillRect(-2.4, -384, 4.8, 30);
+    ctx.fillStyle = "#e8e4d2"; ctx.beginPath(); ctx.arc(0, -252, 16, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = CITIES[idx].land; ctx.lineWidth = 2.6;
+    ctx.beginPath(); ctx.moveTo(0, -252); ctx.lineTo(0, -264); ctx.moveTo(0, -252); ctx.lineTo(9, -247); ctx.stroke();
+  } else { // パリ：鉄塔
+    ctx.beginPath();
+    ctx.moveTo(-86, 0);
+    ctx.quadraticCurveTo(-40, -130, -13, -238);
+    ctx.lineTo(-5, -300); ctx.lineTo(0, -338); ctx.lineTo(5, -300); ctx.lineTo(13, -238);
+    ctx.quadraticCurveTo(40, -130, 86, 0);
+    ctx.lineTo(48, 0);
+    ctx.quadraticCurveTo(26, -104, 10, -168);
+    ctx.lineTo(-10, -168);
+    ctx.quadraticCurveTo(-26, -104, -48, 0);
+    ctx.closePath(); ctx.fill();
+    ctx.fillRect(-34, -176, 68, 9); ctx.fillRect(-19, -240, 38, 8);
+    ctx.fillRect(-1.6, -372, 3.2, 36);
+  }
+  ctx.restore();
+}
+
+function drawBG() {
+  const c = CITIES[cityIdx()];
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, c.skyTop); g.addColorStop(1, c.skyBot);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // 遠景ビル群（パララックス）
+  ctx.fillStyle = c.far;
+  const patW = 1500, off = -(camX * 0.35 % patW);
+  const hs = [150, 210, 120, 260, 175, 300, 140, 225, 165, 280, 130, 195];
+  for (let rep = -1; rep < 2; rep++) {
+    for (let i = 0; i < hs.length; i++) {
+      const bx = rep * patW + i * 128 + off;
+      ctx.fillRect(bx, 520 - hs[i], 104, hs[i]);
+    }
+  }
+  // ランドマーク
+  drawLandmark(cityIdx(), 1560 - camX * 0.6);
+  drawLandmark(cityIdx(), 340 - camX * 0.6);
+}
+
+function drawRoads() {
+  for (const s of segs) {
+    const sx = s.x - camX;
+    if (sx + s.w < -40 || sx > W + 40) continue;
+    // 支柱
+    ctx.fillStyle = "rgba(20,24,44,.55)";
+    for (let px = s.x + 60; px < s.x + s.w - 20; px += 190) ctx.fillRect(px - camX - 4, s.y + 14, 8, 44);
+    // 路面
+    ctx.fillStyle = "#39415f";
+    ctx.fillRect(sx, s.y, s.w, 14);
+    ctx.fillStyle = "#59648c";
+    ctx.fillRect(sx, s.y, s.w, 3);
+    // 塗れた区間
+    for (let i = 0; i < s.tiles.length; i++) {
+      if (!s.tiles[i]) continue;
+      const tx = sx + i * 30;
+      ctx.fillStyle = "#19b8d6";
+      ctx.fillRect(tx, s.y, Math.min(30, s.x + s.w - (s.x + i * 30)), 14);
+      ctx.fillStyle = "#a8f2ff";
+      ctx.fillRect(tx, s.y, Math.min(30, s.x + s.w - (s.x + i * 30)), 3);
+    }
+    // 中央線（未塗装部分）
+    ctx.fillStyle = "rgba(255,255,255,.35)";
+    for (let dx = 8; dx < s.w - 8; dx += 34) {
+      const ti = Math.floor(dx / 30);
+      if (!s.tiles[ti]) ctx.fillRect(sx + dx, s.y + 6, 16, 2.4);
+    }
+  }
+}
+
+function drawCarShape(x, y, face, isPolice, spin, flash) {
+  ctx.save(); ctx.translate(x, y + 11);
+  if (spin) ctx.rotate(Math.sin(time * 0.9) * 0.5);
+  ctx.scale(-face, 1); // 車の絵は進行方向と逆向きが正向き（酒本さんの指定で反転）
+  // ホバーグロー
+  ctx.fillStyle = "rgba(122,232,255,.30)";
+  ctx.beginPath(); ctx.ellipse(0, 13, 26, 4.6, 0, 0, Math.PI * 2); ctx.fill();
+  // ボディ
+  const g = ctx.createLinearGradient(0, -11, 0, 10);
+  if (isPolice) { g.addColorStop(0, "#f2f2f7"); g.addColorStop(0.55, "#c9ccd9"); g.addColorStop(1, "#7d8296"); }
+  else { g.addColorStop(0, "#ffb35a"); g.addColorStop(0.55, "#ff7a3c"); g.addColorStop(1, "#d64f26"); }
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(-23, 8); ctx.quadraticCurveTo(-24, -4, -12, -6); ctx.quadraticCurveTo(-6, -13, 5, -13);
+  ctx.quadraticCurveTo(16, -13, 20, -4); ctx.quadraticCurveTo(24, 0, 23, 8);
+  ctx.closePath(); ctx.fill();
+  // キャノピー
+  ctx.fillStyle = isPolice ? "#2c3550" : "#bfe8ff";
+  ctx.beginPath(); ctx.ellipse(2, -8, 9, 5.4, 0, 0, Math.PI * 2); ctx.fill();
+  if (isPolice) {
+    ctx.fillStyle = "#22263a"; ctx.fillRect(-23, 0, 46, 6); // 黒帯
+    ctx.fillStyle = flash ? "#5aa2ff" : "#ff5a5a"; ctx.fillRect(-7, -17, 6, 4.6);
+    ctx.fillStyle = flash ? "#ff5a5a" : "#5aa2ff"; ctx.fillRect(2, -17, 6, 4.6);
+  }
+  ctx.restore();
+}
+
+function drawCat(c) {
+  const x = c.x - camX, y = c.y;
+  ctx.save(); ctx.translate(x, y); ctx.scale(c.dir, 1);
+  ctx.fillStyle = "#e8e2d4";
+  ctx.beginPath(); ctx.ellipse(0, 6, 12, 6.4, 0, 0, Math.PI * 2); ctx.fill(); // 体
+  ctx.beginPath(); ctx.arc(11, 1, 5.4, 0, Math.PI * 2); ctx.fill(); // 頭
+  ctx.beginPath(); ctx.moveTo(8, -3); ctx.lineTo(9.4, -9); ctx.lineTo(12, -4); ctx.closePath(); ctx.fill(); // 耳
+  ctx.beginPath(); ctx.moveTo(13, -3); ctx.lineTo(15.4, -8.4); ctx.lineTo(16.4, -2.6); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = "#e8e2d4"; ctx.lineWidth = 2.6;
+  ctx.beginPath(); ctx.moveTo(-11, 4); ctx.quadraticCurveTo(-19, 0, -17, -7 + Math.sin(c.t * 0.3) * 2); ctx.stroke(); // しっぽ
+  ctx.fillStyle = "#39415f";
+  ctx.fillRect(-6, 11, 3.4, 4); ctx.fillRect(5, 11, 3.4, 4); // 足
+  ctx.restore();
+}
+
+function draw() {
+  drawBG();
+  drawRoads();
+  // オイル缶
+  for (const c of cans) {
+    if (c.taken) continue;
+    const x = c.x - camX, y = c.y;
+    if (x < -30 || x > W + 30) continue;
+    ctx.fillStyle = "#d63c2e"; ctx.fillRect(x - 6, y - 12, 12, 15);
+    ctx.fillStyle = "#f2d06b"; ctx.fillRect(x - 6, y - 6, 12, 4);
+    ctx.fillStyle = "#7a1d14"; ctx.fillRect(x - 2.4, y - 15.4, 4.8, 3.6);
+  }
+  // 猫・パトカー・投げオイル
+  for (const c of cats) drawCat(c);
+  for (const p of police) drawCarShape(p.x - camX, p.y, p.dir, true, p.spinT > 0, (time >> 3) % 2 === 0);
+  ctx.fillStyle = "#d63c2e";
+  for (const s of shots) ctx.fillRect(s.x - camX - 4, s.y - 5, 8, 10);
+  // 自車
+  if (scene !== "gameover" && car) {
+    if (!(car.inv > 0 && (time >> 2) % 2 === 0)) drawCarShape(car.x - camX, car.y, car.face, false, false, false);
+    if (car.hovering) {
+      ctx.strokeStyle = "rgba(122,232,255,.6)"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.ellipse(car.x - camX, car.y + CAR_H + 5, 30 + Math.sin(time * 0.4) * 3, 5, 0, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+  for (const p of parts) { ctx.globalAlpha = 1 - p.t / p.life; ctx.fillStyle = p.color; ctx.fillRect(p.x - camX - p.size / 2, p.y - p.size / 2, p.size, p.size); }
+  ctx.globalAlpha = 1;
+
+  // HUD
+  ctx.fillStyle = "rgba(6,8,20,.55)"; ctx.fillRect(0, 0, W, 46);
+  ctx.fillStyle = "#eceaf4"; ctx.font = "bold 15px sans-serif"; ctx.textAlign = "left";
+  ctx.fillText("SCORE " + score, 12, 20);
+  ctx.fillStyle = "#9aa3c7"; ctx.font = "12px sans-serif";
+  ctx.fillText("HI " + hi, 12, 37);
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#eceaf4"; ctx.font = "bold 15px sans-serif";
+  ctx.fillText("STAGE " + stage + " ― " + CITIES[cityIdx()].name, W / 2 - 60, 20);
+  // 進捗バー
+  const pct = totalTiles ? coveredCount / totalTiles : 0;
+  ctx.fillStyle = "rgba(255,255,255,.25)"; ctx.fillRect(W / 2 - 130, 27, 260, 9);
+  ctx.fillStyle = "#19b8d6"; ctx.fillRect(W / 2 - 130, 27, 260 * pct, 9);
+  ctx.fillStyle = "#eceaf4"; ctx.font = "12px sans-serif";
+  ctx.fillText(Math.floor(pct * 100) + "%", W / 2 + 148, 36);
+  // ホバーゲージ
+  ctx.textAlign = "right";
+  ctx.font = "bold 12px sans-serif"; ctx.fillStyle = "#7ae8ff";
+  ctx.fillText("ホバー", W - 128, 20);
+  ctx.fillStyle = "rgba(255,255,255,.25)"; ctx.fillRect(W - 122, 10, 110, 9);
+  ctx.fillStyle = car && car.gauge > 25 ? "#7ae8ff" : "#ff5a5a";
+  ctx.fillRect(W - 122, 10, 110 * (car ? car.gauge : 0) / 100, 9);
+  ctx.fillStyle = "#eceaf4"; ctx.font = "12px sans-serif";
+  ctx.fillText("残り " + Math.max(0, lives) + "台　オイル " + (car ? car.oil : 0), W - 12, 37);
+  if (banner) {
+    ctx.fillStyle = "rgba(255,215,106," + Math.min(1, banner.t / 40) + ")";
+    ctx.font = "bold 30px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(banner.text, W / 2, 120);
+  }
+
+  if (scene === "title") {
+    ctx.fillStyle = "rgba(4,6,16,.8)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#ffd76a"; ctx.font = "bold 42px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("ホバーコネクション", W / 2, 160);
+    ctx.fillStyle = "#eceaf4"; ctx.font = "16px sans-serif";
+    ctx.fillText("ホバーカーで街の道路を全部走り尽くそう", W / 2, 198);
+    ctx.font = "15px sans-serif"; ctx.fillStyle = "#c9cdea";
+    ctx.fillText("走った道路は水色に塗られていく。全区間を塗るとステージクリア", W / 2, 254);
+    ctx.fillText("ジャンプに加えて、X長押しでホバー上昇（ゲージ制）", W / 2, 282);
+    ctx.fillText("道路が塗れるのは低空走行のときだけ", W / 2, 310);
+    ctx.fillText("パトカーと猫に当たるとクラッシュ。オイル缶を拾ってZで投げると", W / 2, 338);
+    ctx.fillText("パトカーをスピンさせられる", W / 2, 364);
+    ctx.fillStyle = "#ffd76a"; ctx.font = "bold 19px sans-serif";
+    ctx.fillText("クリックかスペースでスタート", W / 2, 424);
+    ctx.fillStyle = "#9aa3c7"; ctx.font = "13px sans-serif";
+    ctx.fillText("移動：←→／AD　ジャンプ：スペース／↑　ホバー：X長押し　オイル：Z", W / 2, 456);
+  }
+  if (scene === "gameover") {
+    ctx.fillStyle = "rgba(4,6,16,.74)"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#ff5a5a"; ctx.font = "bold 42px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("GAME OVER", W / 2, 240);
+    ctx.fillStyle = "#eceaf4"; ctx.font = "19px sans-serif";
+    ctx.fillText("SCORE " + score + "　到達 STAGE " + stage, W / 2, 292);
+    ctx.fillStyle = "#ffd76a"; ctx.font = "bold 17px sans-serif";
+    ctx.fillText("クリックかスペースでもう一度", W / 2, 348);
+  }
+}
+
+function loop() { update(); draw(); requestAnimationFrame(loop); }
+loop();
+
+// テスト・自動確認用フック
+window.__HC = {
+  state: () => ({ scene, stage, city: CITIES[cityIdx()].name, score, hi, lives, coverPct: totalTiles ? Math.round(coveredCount / totalTiles * 1000) / 10 : 0, covered: coveredCount, total: totalTiles, x: car ? Math.round(car.x) : 0, y: car ? Math.round(car.y) : 0, grounded: car ? car.grounded : false, gauge: car ? Math.round(car.gauge) : 0, oil: car ? car.oil : 0, inv: car ? car.inv : 0, police: police.map(p => ({ x: Math.round(p.x), spinT: p.spinT })), cats: cats.length }),
+  start: () => newGame(),
+  tick: n => { for (let i = 0; i < n; i++) update(); },
+  key: (k, d) => { keys[k] = d; },
+  jump: () => tryJump(),
+  throwOil: () => throwOil(),
+  setPos: (x, y) => { if (car) { car.x = x; car.y = y; car.vx = 0; car.vy = 0; } },
+  setInv: v => { if (car) car.inv = v; },
+  giveOil: () => { if (car) car.oil = 3; },
+  addPoliceAt: (x, segLv) => { const s = segs.find(sg => sg.lv === segLv) || segs[0]; const p = { seg: s, x, minX: x, maxX: x, dir: 1, speed: 0, spinT: 0, y: s.y - 24 }; police.push(p); return p; },
+  addCatAt: (x, segLv) => { const s = segs.find(sg => sg.lv === segLv) || segs[0]; cats.push({ seg: s, x, dir: 1, y: s.y - 15, t: 0 }); },
+  coverAll: () => { for (const s of segs) { for (let i = 0; i < s.tiles.length; i++) if (!s.tiles[i]) { s.tiles[i] = 1; s.covered++; coveredCount++; } } },
+  clearPolice: () => { police = []; },
+  clearCats: () => { cats = []; },
+};
+</script>
+</body>
+</html>
