@@ -34,6 +34,7 @@
     <button id="btnUnlock">解放する</button>
     <p id="unlockMsg"></p>
   </div>
+  <p id="unlockStatus" style="color:#a5d6a7;font-size:14px;min-height:18px;margin:6px;"></p>
 </div>
 <p class="note">NAWOMIDOUゲーム館 第14弾・EX版</p>
 <script>
@@ -63,7 +64,7 @@ function refreshExUI() {
   const btn = document.getElementById("btnEx");
   const area = document.getElementById("unlockArea");
   if (!btn) return;
-  if (exUnlocked) { btn.textContent = "▶ EXモードでスタート"; btn.disabled = false; if (area) area.style.display = "none"; }
+  if (exUnlocked) { btn.textContent = "▶ EXモードでスタート"; btn.disabled = false; if (area) area.style.display = "none"; const st = document.getElementById("unlockStatus"); if (st) st.textContent = "EXモード解放済みです。下のボタンからEXモードで遊べます。"; }
   else { btn.textContent = "🔒 EXモード（ロック中）"; }
 }
 document.addEventListener("DOMContentLoaded", refreshExUI);
